@@ -430,6 +430,144 @@ func decodeCanons(r *bytes.Reader) ([]component.Canon, error) {
 				ResourceTypeIndex: typeIdx,
 			}
 
+		case component.CanonKindTaskCancel,
+			component.CanonKindBackpressureSet,
+			component.CanonKindSubtaskDrop,
+			component.CanonKindErrorContextDrop,
+			component.CanonKindWaitableSetNew,
+			component.CanonKindWaitableSetDrop,
+			component.CanonKindWaitableJoin:
+			// No arguments.
+			canons[i] = component.Canon{Kind: component.CanonKind(kind)}
+
+		case component.CanonKindSubtaskCancel,
+			component.CanonKindYield,
+			component.CanonKindWaitableSetWait,
+			component.CanonKindWaitableSetPoll:
+			// Single async flag byte.
+			asyncByte, err := r.ReadByte()
+			if err != nil {
+				return nil, fmt.Errorf("read async flag: %w", err)
+			}
+			canons[i] = component.Canon{
+				Kind:      component.CanonKind(kind),
+				AsyncFlag: asyncByte != 0,
+			}
+
+		case component.CanonKindTaskReturn:
+			// task.return: result?:typeidx? opts:vec(canonopt)
+			// Optional type uses 0x00 idx (some) or 0x01 (none).
+			hasResult, err := r.ReadByte()
+			if err != nil {
+				return nil, fmt.Errorf("read task.return has-result: %w", err)
+			}
+			c := component.Canon{Kind: component.CanonKindTaskReturn}
+			if hasResult == 0x00 {
+				idx, _, err := leb128.DecodeUint32(r)
+				if err != nil {
+					return nil, fmt.Errorf("read task.return type index: %w", err)
+				}
+				c.ResultType = &idx
+			}
+			opts, err := decodeCanonOptions(r)
+			if err != nil {
+				return nil, err
+			}
+			c.Options = opts
+			canons[i] = c
+
+		case component.CanonKindContextGet, component.CanonKindContextSet:
+			// context.get/set: core_valtype:byte index:u32
+			vt, err := r.ReadByte()
+			if err != nil {
+				return nil, fmt.Errorf("read context valtype: %w", err)
+			}
+			idx, _, err := leb128.DecodeUint32(r)
+			if err != nil {
+				return nil, fmt.Errorf("read context index: %w", err)
+			}
+			canons[i] = component.Canon{
+				Kind:         component.CanonKind(kind),
+				CoreValType:  vt,
+				ContextIndex: idx,
+			}
+
+		case component.CanonKindStreamNew,
+			component.CanonKindStreamDropReadable,
+			component.CanonKindStreamDropWritable,
+			component.CanonKindFutureNew,
+			component.CanonKindFutureDropReadable,
+			component.CanonKindFutureDropWritable:
+			// Single type index.
+			typeIdx, _, err := leb128.DecodeUint32(r)
+			if err != nil {
+				return nil, fmt.Errorf("read stream/future type index: %w", err)
+			}
+			canons[i] = component.Canon{
+				Kind:                  component.CanonKind(kind),
+				StreamFutureTypeIndex: typeIdx,
+			}
+
+		case component.CanonKindStreamRead,
+			component.CanonKindStreamWrite,
+			component.CanonKindFutureRead,
+			component.CanonKindFutureWrite:
+			// Type index followed by options.
+			typeIdx, _, err := leb128.DecodeUint32(r)
+			if err != nil {
+				return nil, fmt.Errorf("read stream/future type index: %w", err)
+			}
+			opts, err := decodeCanonOptions(r)
+			if err != nil {
+				return nil, err
+			}
+			canons[i] = component.Canon{
+				Kind:                  component.CanonKind(kind),
+				StreamFutureTypeIndex: typeIdx,
+				Options:               opts,
+			}
+
+		case component.CanonKindStreamCancelRead,
+			component.CanonKindStreamCancelWrite,
+			component.CanonKindFutureCancelRead,
+			component.CanonKindFutureCancelWrite:
+			// Type index followed by async flag.
+			typeIdx, _, err := leb128.DecodeUint32(r)
+			if err != nil {
+				return nil, fmt.Errorf("read stream/future type index: %w", err)
+			}
+			asyncByte, err := r.ReadByte()
+			if err != nil {
+				return nil, fmt.Errorf("read async flag: %w", err)
+			}
+			canons[i] = component.Canon{
+				Kind:                  component.CanonKind(kind),
+				StreamFutureTypeIndex: typeIdx,
+				AsyncFlag:             asyncByte != 0,
+			}
+
+		case component.CanonKindErrorContextNew:
+			// error-context.new: opts:vec(canonopt)
+			opts, err := decodeCanonOptions(r)
+			if err != nil {
+				return nil, err
+			}
+			canons[i] = component.Canon{
+				Kind:    component.CanonKindErrorContextNew,
+				Options: opts,
+			}
+
+		case component.CanonKindErrorContextDebugMsg:
+			// error-context.debug-message: opts:vec(canonopt)
+			opts, err := decodeCanonOptions(r)
+			if err != nil {
+				return nil, err
+			}
+			canons[i] = component.Canon{
+				Kind:    component.CanonKindErrorContextDebugMsg,
+				Options: opts,
+			}
+
 		default:
 			return nil, fmt.Errorf("unknown canon kind: %#x", kind)
 		}

@@ -34,10 +34,13 @@ func decodeComponentDefinedType(r *bytes.Reader) (component.ComponentDefinedType
 	}
 
 	switch {
-	case tag == byte(component.DefinedTypeKindFunc):
+	case tag == byte(component.DefinedTypeKindFunc) || tag == byte(component.DefinedTypeKindAsyncFunc):
 		ft, err := decodeFuncType(r)
 		if err != nil {
 			return component.ComponentDefinedType{}, err
+		}
+		if tag == byte(component.DefinedTypeKindAsyncFunc) {
+			ft.Async = true
 		}
 		return component.ComponentDefinedType{
 			Kind: component.DefinedTypeKindFunc,

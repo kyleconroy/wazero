@@ -238,30 +238,61 @@ type Canon struct {
 
 	// For ResourceNew/ResourceDrop/ResourceRep:
 	ResourceTypeIndex uint32
+
+	// For TaskReturn: optional result type index.
+	ResultType *uint32
+
+	// For ContextGet/ContextSet: core value type and context slot index.
+	CoreValType byte
+	ContextIndex uint32
+
+	// For stream/future operations with a type index.
+	StreamFutureTypeIndex uint32
+
+	// For SubtaskCancel/Yield/StreamCancelRead/StreamCancelWrite/
+	// FutureCancelRead/FutureCancelWrite/WaitableSetWait/WaitableSetPoll:
+	AsyncFlag bool
 }
 
 // CanonKind indicates the canonical function kind.
 type CanonKind byte
 
 const (
-	CanonKindLift            CanonKind = 0x00
-	CanonKindLower           CanonKind = 0x01
-	CanonKindResourceNew     CanonKind = 0x02
-	CanonKindResourceDrop    CanonKind = 0x03
-	CanonKindResourceRep     CanonKind = 0x04
-	CanonKindTaskCancel      CanonKind = 0x05
-	CanonKindSubtaskCancel   CanonKind = 0x06
-	CanonKindBackpressureSet CanonKind = 0x08
-	CanonKindTaskReturn      CanonKind = 0x09
-	CanonKindThreadYield     CanonKind = 0x0c
-	CanonKindSubtaskDrop     CanonKind = 0x0d
-	CanonKindStreamNew       CanonKind = 0x0e
-	CanonKindStreamRead      CanonKind = 0x0f
-	CanonKindStreamWrite     CanonKind = 0x10
-	CanonKindFutureNew       CanonKind = 0x11
-	CanonKindFutureRead      CanonKind = 0x12
-	CanonKindFutureWrite     CanonKind = 0x13
-	CanonKindErrorContextNew CanonKind = 0x1c
+	CanonKindLift                  CanonKind = 0x00
+	CanonKindLower                 CanonKind = 0x01
+	CanonKindResourceNew           CanonKind = 0x02
+	CanonKindResourceDrop          CanonKind = 0x03
+	CanonKindResourceRep           CanonKind = 0x04
+	CanonKindTaskCancel            CanonKind = 0x05
+	CanonKindSubtaskCancel         CanonKind = 0x06
+	CanonKindBackpressureSet       CanonKind = 0x08
+	CanonKindTaskReturn            CanonKind = 0x09
+	CanonKindContextGet            CanonKind = 0x0a
+	CanonKindContextSet            CanonKind = 0x0b
+	CanonKindYield                 CanonKind = 0x0c
+	CanonKindSubtaskDrop           CanonKind = 0x0d
+	CanonKindStreamNew             CanonKind = 0x0e
+	CanonKindStreamRead            CanonKind = 0x0f
+	CanonKindStreamWrite           CanonKind = 0x10
+	CanonKindStreamCancelRead      CanonKind = 0x11
+	CanonKindStreamCancelWrite     CanonKind = 0x12
+	CanonKindStreamDropReadable    CanonKind = 0x13
+	CanonKindStreamDropWritable    CanonKind = 0x14
+	CanonKindFutureNew             CanonKind = 0x15
+	CanonKindFutureRead            CanonKind = 0x16
+	CanonKindFutureWrite           CanonKind = 0x17
+	CanonKindFutureCancelRead      CanonKind = 0x18
+	CanonKindFutureCancelWrite     CanonKind = 0x19
+	CanonKindFutureDropReadable    CanonKind = 0x1a
+	CanonKindFutureDropWritable    CanonKind = 0x1b
+	CanonKindErrorContextNew       CanonKind = 0x1c
+	CanonKindErrorContextDebugMsg  CanonKind = 0x1d
+	CanonKindErrorContextDrop      CanonKind = 0x1e
+	CanonKindWaitableSetNew        CanonKind = 0x1f
+	CanonKindWaitableSetWait       CanonKind = 0x20
+	CanonKindWaitableSetPoll       CanonKind = 0x21
+	CanonKindWaitableSetDrop       CanonKind = 0x22
+	CanonKindWaitableJoin          CanonKind = 0x23
 )
 
 // CanonOption represents an option on a canonical function.

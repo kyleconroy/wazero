@@ -199,6 +199,7 @@ type FutureType struct {
 
 // FuncType represents a component-level function type.
 type FuncType struct {
+	Async   bool
 	Params  []NamedType
 	Results []NamedType
 }
@@ -225,10 +226,11 @@ type ComponentDefinedType struct {
 type DefinedTypeKind byte
 
 const (
+	DefinedTypeKindResource  DefinedTypeKind = 0x3f
 	DefinedTypeKindFunc      DefinedTypeKind = 0x40
 	DefinedTypeKindComponent DefinedTypeKind = 0x41
 	DefinedTypeKindInstance  DefinedTypeKind = 0x42
-	DefinedTypeKindResource  DefinedTypeKind = 0x3f
+	DefinedTypeKindAsyncFunc DefinedTypeKind = 0x43
 	DefinedTypeKindType      DefinedTypeKind = 0x00 // a value type definition
 )
 
