@@ -434,6 +434,28 @@ func decodeComponentValType(r *bytes.Reader) (component.ComponentType, error) {
 			Borrow: &component.BorrowType{TypeIndex: idx},
 		}, nil
 
+	// Stream type (WASI P3)
+	case tag == byte(component.TypeKindStream):
+		st, err := decodeStreamType(r)
+		if err != nil {
+			return component.ComponentType{}, err
+		}
+		return component.ComponentType{
+			Kind:   component.ComponentTypeKindStream,
+			Stream: st,
+		}, nil
+
+	// Future type (WASI P3)
+	case tag == byte(component.TypeKindFuture):
+		ft, err := decodeFutureType(r)
+		if err != nil {
+			return component.ComponentType{}, err
+		}
+		return component.ComponentType{
+			Kind:   component.ComponentTypeKindFuture,
+			Future: ft,
+		}, nil
+
 	default:
 		return component.ComponentType{}, fmt.Errorf("unknown val type tag: %#x", tag)
 	}
@@ -627,4 +649,40 @@ func decodeResultType(r *bytes.Reader) (*component.ResultType, error) {
 	}
 
 	return rt, nil
+}
+
+func decodeStreamType(r *bytes.Reader) (*component.StreamType, error) {
+	// Stream encoding: optional element type (0x01 followed by valtype, or 0x00 for none).
+	hasElement, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("read stream has element: %w", err)
+	}
+
+	st := &component.StreamType{}
+	if hasElement == 0x01 {
+		elemType, err := decodeComponentValType(r)
+		if err != nil {
+			return nil, fmt.Errorf("stream element type: %w", err)
+		}
+		st.Element = &elemType
+	}
+	return st, nil
+}
+
+func decodeFutureType(r *bytes.Reader) (*component.FutureType, error) {
+	// Future encoding: optional payload type (0x01 followed by valtype, or 0x00 for none).
+	hasPayload, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("read future has payload: %w", err)
+	}
+
+	ft := &component.FutureType{}
+	if hasPayload == 0x01 {
+		payloadType, err := decodeComponentValType(r)
+		if err != nil {
+			return nil, fmt.Errorf("future payload type: %w", err)
+		}
+		ft.Type = &payloadType
+	}
+	return ft, nil
 }

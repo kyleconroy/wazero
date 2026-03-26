@@ -72,6 +72,8 @@ const (
 	TypeKindResult  TypeKind = 0x6a
 	TypeKindOwn     TypeKind = 0x69
 	TypeKindBorrow  TypeKind = 0x68
+	TypeKindStream  TypeKind = 0x66
+	TypeKindFuture  TypeKind = 0x65
 )
 
 // ComponentType represents a type in the component model type system.
@@ -97,6 +99,8 @@ type ComponentType struct {
 	Result  *ResultType
 	Own     *OwnType
 	Borrow  *BorrowType
+	Stream  *StreamType
+	Future  *FutureType
 }
 
 // ComponentTypeKind indicates what kind of component type this is.
@@ -115,6 +119,8 @@ const (
 	ComponentTypeKindResult
 	ComponentTypeKindOwn
 	ComponentTypeKindBorrow
+	ComponentTypeKindStream
+	ComponentTypeKindFuture
 )
 
 // RecordType represents a record (struct) type.
@@ -179,6 +185,16 @@ type OwnType struct {
 // BorrowType represents a borrow<T> handle type.
 type BorrowType struct {
 	TypeIndex uint32 // index of the resource type
+}
+
+// StreamType represents a stream<T> type (WASI P3 async).
+type StreamType struct {
+	Element *ComponentType // nil if no element type
+}
+
+// FutureType represents a future<T> type (WASI P3 async).
+type FutureType struct {
+	Type *ComponentType // nil if no payload type
 }
 
 // FuncType represents a component-level function type.

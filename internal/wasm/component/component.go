@@ -243,11 +243,24 @@ type Canon struct {
 type CanonKind byte
 
 const (
-	CanonKindLift         CanonKind = 0x00
-	CanonKindLower        CanonKind = 0x01
-	CanonKindResourceNew  CanonKind = 0x02
-	CanonKindResourceDrop CanonKind = 0x03
-	CanonKindResourceRep  CanonKind = 0x04
+	CanonKindLift            CanonKind = 0x00
+	CanonKindLower           CanonKind = 0x01
+	CanonKindResourceNew     CanonKind = 0x02
+	CanonKindResourceDrop    CanonKind = 0x03
+	CanonKindResourceRep     CanonKind = 0x04
+	CanonKindTaskCancel      CanonKind = 0x05
+	CanonKindSubtaskCancel   CanonKind = 0x06
+	CanonKindBackpressureSet CanonKind = 0x08
+	CanonKindTaskReturn      CanonKind = 0x09
+	CanonKindThreadYield     CanonKind = 0x0c
+	CanonKindSubtaskDrop     CanonKind = 0x0d
+	CanonKindStreamNew       CanonKind = 0x0e
+	CanonKindStreamRead      CanonKind = 0x0f
+	CanonKindStreamWrite     CanonKind = 0x10
+	CanonKindFutureNew       CanonKind = 0x11
+	CanonKindFutureRead      CanonKind = 0x12
+	CanonKindFutureWrite     CanonKind = 0x13
+	CanonKindErrorContextNew CanonKind = 0x1c
 )
 
 // CanonOption represents an option on a canonical function.
@@ -266,6 +279,8 @@ const (
 	CanonOptionKindMemory    CanonOptionKind = 0x03
 	CanonOptionKindRealloc   CanonOptionKind = 0x04
 	CanonOptionKindPostReturn CanonOptionKind = 0x05
+	CanonOptionKindAsync     CanonOptionKind = 0x06
+	CanonOptionKindCallback  CanonOptionKind = 0x07
 )
 
 // ComponentStart describes the start function for the component.

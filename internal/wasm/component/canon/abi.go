@@ -47,6 +47,8 @@ func Alignment(t *component.ComponentType) uint32 {
 		return resultAlignment(t.Result)
 	case component.ComponentTypeKindOwn, component.ComponentTypeKindBorrow:
 		return 4 // handle is i32
+	case component.ComponentTypeKindStream, component.ComponentTypeKindFuture:
+		return 4 // handle is i32
 	default:
 		return 1
 	}
@@ -74,6 +76,8 @@ func Size(t *component.ComponentType) uint32 {
 	case component.ComponentTypeKindResult:
 		return resultSize(t.Result)
 	case component.ComponentTypeKindOwn, component.ComponentTypeKindBorrow:
+		return 4 // handle is i32
+	case component.ComponentTypeKindStream, component.ComponentTypeKindFuture:
 		return 4 // handle is i32
 	default:
 		return 0

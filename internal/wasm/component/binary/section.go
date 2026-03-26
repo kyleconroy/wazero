@@ -329,6 +329,13 @@ func decodeCanons(r *bytes.Reader) ([]component.Canon, error) {
 
 		switch component.CanonKind(kind) {
 		case component.CanonKindLift:
+			// canon lift has a reserved second byte (0x00) per the binary format spec.
+			if reserved, err := r.ReadByte(); err != nil {
+				return nil, fmt.Errorf("read canon lift reserved byte: %w", err)
+			} else if reserved != 0x00 {
+				return nil, fmt.Errorf("expected 0x00 reserved byte after canon lift, got %#x", reserved)
+			}
+
 			coreFuncIdx, _, err := leb128.DecodeUint32(r)
 			if err != nil {
 				return nil, fmt.Errorf("read core func index: %w", err)
@@ -352,6 +359,13 @@ func decodeCanons(r *bytes.Reader) ([]component.Canon, error) {
 			}
 
 		case component.CanonKindLower:
+			// canon lower has a reserved second byte (0x00) per the binary format spec.
+			if reserved, err := r.ReadByte(); err != nil {
+				return nil, fmt.Errorf("read canon lower reserved byte: %w", err)
+			} else if reserved != 0x00 {
+				return nil, fmt.Errorf("expected 0x00 reserved byte after canon lower, got %#x", reserved)
+			}
+
 			funcIdx, _, err := leb128.DecodeUint32(r)
 			if err != nil {
 				return nil, fmt.Errorf("read func index: %w", err)
@@ -426,9 +440,11 @@ func decodeCanonOptions(r *bytes.Reader) ([]component.CanonOption, error) {
 		opt := component.CanonOption{Kind: component.CanonOptionKind(optKind)}
 
 		switch component.CanonOptionKind(optKind) {
-		case component.CanonOptionKindUTF8, component.CanonOptionKindUTF16, component.CanonOptionKindLatin1:
+		case component.CanonOptionKindUTF8, component.CanonOptionKindUTF16,
+			component.CanonOptionKindLatin1, component.CanonOptionKindAsync:
 			// No additional data
-		case component.CanonOptionKindMemory, component.CanonOptionKindRealloc, component.CanonOptionKindPostReturn:
+		case component.CanonOptionKindMemory, component.CanonOptionKindRealloc,
+			component.CanonOptionKindPostReturn, component.CanonOptionKindCallback:
 			val, _, err := leb128.DecodeUint32(r)
 			if err != nil {
 				return nil, fmt.Errorf("read option value: %w", err)
