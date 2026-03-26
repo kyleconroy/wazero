@@ -165,7 +165,10 @@ func IsComponent(data []byte) bool {
 }
 
 // decodeCoreModule decodes an embedded core wasm module.
+// Core modules in components require at least V2 features (multi-value, etc.).
 func decodeCoreModule(data []byte, features api.CoreFeatures, memLimit uint32, memCapFromMax bool) (*wasm.Module, error) {
+	// The Component Model requires core modules to support at least V2 features.
+	features |= api.CoreFeaturesV2
 	return coreBinary.DecodeModule(data, features, memLimit, memCapFromMax, false, false)
 }
 

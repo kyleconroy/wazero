@@ -164,8 +164,7 @@ func decodeComponentTypeDecl(r *bytes.Reader) (*component.ComponentTypeDecl, err
 		return nil, fmt.Errorf("read decl count: %w", err)
 	}
 
-	var imports []component.ComponentImport
-	var exports []component.ComponentExport
+	ctd := &component.ComponentTypeDecl{}
 
 	for i := uint32(0); i < count; i++ {
 		declKind, err := r.ReadByte()
@@ -174,12 +173,29 @@ func decodeComponentTypeDecl(r *bytes.Reader) (*component.ComponentTypeDecl, err
 		}
 
 		switch declKind {
-		case 0x03: // import
-			name, _, err := decodeUTF8(r, "component type import name")
+		case 0x00: // core type
+			ct, err := decodeSingleCoreType(r)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("component core type: %w", err)
 			}
-			url, _, err := decodeUTF8(r, "component type import URL")
+			ctd.CoreTypes = append(ctd.CoreTypes, ct)
+
+		case 0x01: // inline type definition
+			t, err := decodeComponentDefinedType(r)
+			if err != nil {
+				return nil, fmt.Errorf("component inline type: %w", err)
+			}
+			ctd.Types = append(ctd.Types, t)
+
+		case 0x02: // alias
+			alias, err := decodeSingleAlias(r)
+			if err != nil {
+				return nil, fmt.Errorf("component alias: %w", err)
+			}
+			ctd.Aliases = append(ctd.Aliases, alias)
+
+		case 0x03: // import
+			name, url, err := decodeExternName(r)
 			if err != nil {
 				return nil, err
 			}
@@ -187,29 +203,25 @@ func decodeComponentTypeDecl(r *bytes.Reader) (*component.ComponentTypeDecl, err
 			if err != nil {
 				return nil, err
 			}
-			imports = append(imports, component.ComponentImport{
+			ctd.Imports = append(ctd.Imports, component.ComponentImport{
 				Name: name,
 				URL:  url,
 				Desc: desc,
 			})
 
 		case 0x04: // export
-			name, _, err := decodeUTF8(r, "component type export name")
+			name, _, err := decodeExternName(r)
 			if err != nil {
 				return nil, err
 			}
-			kind, err := r.ReadByte()
+			desc, err := decodeExternDesc(r)
 			if err != nil {
-				return nil, fmt.Errorf("read export kind: %w", err)
+				return nil, fmt.Errorf("component export desc: %w", err)
 			}
-			idx, _, err := leb128.DecodeUint32(r)
-			if err != nil {
-				return nil, fmt.Errorf("read export index: %w", err)
-			}
-			exports = append(exports, component.ComponentExport{
+			ctd.Exports = append(ctd.Exports, component.ComponentExport{
 				Name:  name,
-				Kind:  component.ExternDescKind(kind),
-				Index: idx,
+				Kind:  desc.Kind,
+				Index: desc.TypeIndex,
 			})
 
 		default:
@@ -217,10 +229,7 @@ func decodeComponentTypeDecl(r *bytes.Reader) (*component.ComponentTypeDecl, err
 		}
 	}
 
-	return &component.ComponentTypeDecl{
-		Imports: imports,
-		Exports: exports,
-	}, nil
+	return ctd, nil
 }
 
 // decodeInstanceTypeDecl decodes an inline instance type declaration.
@@ -230,7 +239,7 @@ func decodeInstanceTypeDecl(r *bytes.Reader) (*component.InstanceTypeDecl, error
 		return nil, fmt.Errorf("read decl count: %w", err)
 	}
 
-	exports := make([]component.ComponentExport, 0, count)
+	itd := &component.InstanceTypeDecl{}
 	for i := uint32(0); i < count; i++ {
 		declKind, err := r.ReadByte()
 		if err != nil {
@@ -238,23 +247,46 @@ func decodeInstanceTypeDecl(r *bytes.Reader) (*component.InstanceTypeDecl, error
 		}
 
 		switch declKind {
+		case 0x00: // core type
+			if err := r.UnreadByte(); err != nil {
+				return nil, err
+			}
+			// Core types in instance type decls aren't typical; skip the tag and
+			// decode as a core function type.
+			r.ReadByte() // re-consume 0x00
+			ct, err := decodeSingleCoreType(r)
+			if err != nil {
+				return nil, fmt.Errorf("instance core type: %w", err)
+			}
+			itd.CoreTypes = append(itd.CoreTypes, ct)
+
+		case 0x01: // inline type definition
+			t, err := decodeComponentDefinedType(r)
+			if err != nil {
+				return nil, fmt.Errorf("instance inline type: %w", err)
+			}
+			itd.Types = append(itd.Types, t)
+
+		case 0x02: // alias
+			alias, err := decodeSingleAlias(r)
+			if err != nil {
+				return nil, fmt.Errorf("instance alias: %w", err)
+			}
+			itd.Aliases = append(itd.Aliases, alias)
+
 		case 0x04: // export
-			name, _, err := decodeUTF8(r, "instance type export name")
+			name, _, err := decodeExternName(r)
 			if err != nil {
 				return nil, err
 			}
-			kind, err := r.ReadByte()
+			desc, err := decodeExternDesc(r)
 			if err != nil {
-				return nil, fmt.Errorf("read export kind: %w", err)
+				return nil, fmt.Errorf("instance export desc: %w", err)
 			}
-			idx, _, err := leb128.DecodeUint32(r)
-			if err != nil {
-				return nil, fmt.Errorf("read export index: %w", err)
-			}
-			exports = append(exports, component.ComponentExport{
+			itd.Exports = append(itd.Exports, component.ComponentExport{
 				Name:  name,
-				Kind:  component.ExternDescKind(kind),
-				Index: idx,
+				Kind:  desc.Kind,
+				Index: desc.TypeIndex,
 			})
 
 		default:
@@ -262,9 +294,7 @@ func decodeInstanceTypeDecl(r *bytes.Reader) (*component.InstanceTypeDecl, error
 		}
 	}
 
-	return &component.InstanceTypeDecl{
-		Exports: exports,
-	}, nil
+	return itd, nil
 }
 
 // decodeResourceType decodes a resource type.
@@ -602,50 +632,33 @@ func decodeOptionType(r *bytes.Reader) (*component.OptionType, error) {
 }
 
 func decodeResultType(r *bytes.Reader) (*component.ResultType, error) {
-	// Result encoding: tag byte followed by optional ok and error types.
-	tag, err := r.ReadByte()
-	if err != nil {
-		return nil, fmt.Errorf("read result tag: %w", err)
-	}
-
+	// Result encoding: two optional fields (ok and err), each either 0x00 (none) or 0x01 + type (some).
 	rt := &component.ResultType{}
 
-	switch tag {
-	case 0x00:
-		// result<ok, err> - both present
+	// Read ok optional
+	hasOk, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("read result ok flag: %w", err)
+	}
+	if hasOk == 0x01 {
 		okType, err := decodeComponentValType(r)
 		if err != nil {
 			return nil, fmt.Errorf("ok type: %w", err)
 		}
 		rt.Ok = &okType
+	}
 
+	// Read err optional
+	hasErr, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("read result err flag: %w", err)
+	}
+	if hasErr == 0x01 {
 		errType, err := decodeComponentValType(r)
 		if err != nil {
 			return nil, fmt.Errorf("err type: %w", err)
 		}
 		rt.Err = &errType
-
-	case 0x01:
-		// result<ok> - only ok
-		okType, err := decodeComponentValType(r)
-		if err != nil {
-			return nil, fmt.Errorf("ok type: %w", err)
-		}
-		rt.Ok = &okType
-
-	case 0x02:
-		// result<_, err> - only error
-		errType, err := decodeComponentValType(r)
-		if err != nil {
-			return nil, fmt.Errorf("err type: %w", err)
-		}
-		rt.Err = &errType
-
-	case 0x03:
-		// result - neither
-
-	default:
-		return nil, fmt.Errorf("unknown result tag: %#x", tag)
 	}
 
 	return rt, nil

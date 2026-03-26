@@ -112,40 +112,47 @@ func decodeCoreTypes(r *bytes.Reader) ([]wasm.FunctionType, error) {
 
 	types := make([]wasm.FunctionType, count)
 	for i := uint32(0); i < count; i++ {
-		// Core types in components are wrapped in a 0x00 tag for "core type",
-		// followed by the standard function type encoding.
-		tag, err := r.ReadByte()
+		ft, err := decodeSingleCoreType(r)
 		if err != nil {
-			return nil, fmt.Errorf("read core type tag: %w", err)
+			return nil, fmt.Errorf("core type[%d]: %w", i, err)
 		}
-		if tag != 0x60 {
-			return nil, fmt.Errorf("unsupported core type tag: %#x (expected function type 0x60)", tag)
-		}
-
-		paramCount, _, err := leb128.DecodeUint32(r)
-		if err != nil {
-			return nil, fmt.Errorf("read param count: %w", err)
-		}
-		params := make([]wasm.ValueType, paramCount)
-		if _, err := io.ReadFull(r, params); err != nil {
-			return nil, fmt.Errorf("read param types: %w", err)
-		}
-
-		resultCount, _, err := leb128.DecodeUint32(r)
-		if err != nil {
-			return nil, fmt.Errorf("read result count: %w", err)
-		}
-		results := make([]wasm.ValueType, resultCount)
-		if _, err := io.ReadFull(r, results); err != nil {
-			return nil, fmt.Errorf("read result types: %w", err)
-		}
-
-		types[i] = wasm.FunctionType{
-			Params:  params,
-			Results: results,
-		}
+		types[i] = ft
 	}
 	return types, nil
+}
+
+// decodeSingleCoreType decodes a single core function type definition.
+func decodeSingleCoreType(r *bytes.Reader) (wasm.FunctionType, error) {
+	tag, err := r.ReadByte()
+	if err != nil {
+		return wasm.FunctionType{}, fmt.Errorf("read core type tag: %w", err)
+	}
+	if tag != 0x60 {
+		return wasm.FunctionType{}, fmt.Errorf("unsupported core type tag: %#x (expected function type 0x60)", tag)
+	}
+
+	paramCount, _, err := leb128.DecodeUint32(r)
+	if err != nil {
+		return wasm.FunctionType{}, fmt.Errorf("read param count: %w", err)
+	}
+	params := make([]wasm.ValueType, paramCount)
+	if _, err := io.ReadFull(r, params); err != nil {
+		return wasm.FunctionType{}, fmt.Errorf("read param types: %w", err)
+	}
+
+	resultCount, _, err := leb128.DecodeUint32(r)
+	if err != nil {
+		return wasm.FunctionType{}, fmt.Errorf("read result count: %w", err)
+	}
+	results := make([]wasm.ValueType, resultCount)
+	if _, err := io.ReadFull(r, results); err != nil {
+		return wasm.FunctionType{}, fmt.Errorf("read result types: %w", err)
+	}
+
+	return wasm.FunctionType{
+		Params:  params,
+		Results: results,
+	}, nil
 }
 
 // decodeInstances decodes a vector of component-level instance definitions.
@@ -249,68 +256,79 @@ func decodeAliases(r *bytes.Reader) ([]component.Alias, error) {
 
 	aliases := make([]component.Alias, count)
 	for i := uint32(0); i < count; i++ {
-		sort, err := r.ReadByte()
+		a, err := decodeSingleAlias(r)
 		if err != nil {
-			return nil, fmt.Errorf("read alias sort: %w", err)
+			return nil, fmt.Errorf("alias[%d]: %w", i, err)
 		}
-
-		// Determine if this is a core sort or component sort.
-		var aliasSort component.AliasSort
-		if sort == 0x00 {
-			// Core sort follows
-			coreSortByte, err := r.ReadByte()
-			if err != nil {
-				return nil, fmt.Errorf("read core sort: %w", err)
-			}
-			aliasSort = component.AliasSort(0x10 + coreSortByte)
-		} else {
-			aliasSort = component.AliasSort(sort)
-		}
-
-		// Read the alias target kind.
-		targetKind, err := r.ReadByte()
-		if err != nil {
-			return nil, fmt.Errorf("read alias kind: %w", err)
-		}
-
-		switch component.AliasKind(targetKind) {
-		case component.AliasKindInstanceExport:
-			instanceIdx, _, err := leb128.DecodeUint32(r)
-			if err != nil {
-				return nil, fmt.Errorf("read instance index: %w", err)
-			}
-			name, _, err := decodeUTF8(r, "alias export name")
-			if err != nil {
-				return nil, err
-			}
-			aliases[i] = component.Alias{
-				Kind:          component.AliasKindInstanceExport,
-				Sort:          aliasSort,
-				InstanceIndex: instanceIdx,
-				Name:          name,
-			}
-
-		case component.AliasKindOuter:
-			outerCount, _, err := leb128.DecodeUint32(r)
-			if err != nil {
-				return nil, fmt.Errorf("read outer count: %w", err)
-			}
-			outerIdx, _, err := leb128.DecodeUint32(r)
-			if err != nil {
-				return nil, fmt.Errorf("read outer index: %w", err)
-			}
-			aliases[i] = component.Alias{
-				Kind:       component.AliasKindOuter,
-				Sort:       aliasSort,
-				OuterCount: outerCount,
-				OuterIndex: outerIdx,
-			}
-
-		default:
-			return nil, fmt.Errorf("unknown alias kind: %#x", targetKind)
-		}
+		aliases[i] = a
 	}
 	return aliases, nil
+}
+
+// decodeSingleAlias decodes one alias definition.
+// Format: sort target
+//   - sort: 0x00 + core_sort_byte for core sorts, or component sort byte directly
+//   - target: 0x00 = component instance export (idx, name)
+//     0x01 = core instance export (idx, name)
+//     0x02 = outer (count, idx)
+func decodeSingleAlias(r *bytes.Reader) (component.Alias, error) {
+	sort, err := r.ReadByte()
+	if err != nil {
+		return component.Alias{}, fmt.Errorf("read alias sort: %w", err)
+	}
+
+	var aliasSort component.AliasSort
+	if sort == 0x00 {
+		coreSortByte, err := r.ReadByte()
+		if err != nil {
+			return component.Alias{}, fmt.Errorf("read core sort: %w", err)
+		}
+		aliasSort = component.AliasSort(0x10 + coreSortByte)
+	} else {
+		aliasSort = component.AliasSort(sort)
+	}
+
+	targetKind, err := r.ReadByte()
+	if err != nil {
+		return component.Alias{}, fmt.Errorf("read alias target kind: %w", err)
+	}
+
+	switch component.AliasKind(targetKind) {
+	case component.AliasKindInstanceExport, component.AliasKindCoreInstanceExport:
+		instanceIdx, _, err := leb128.DecodeUint32(r)
+		if err != nil {
+			return component.Alias{}, fmt.Errorf("read instance index: %w", err)
+		}
+		name, _, err := decodeUTF8(r, "alias export name")
+		if err != nil {
+			return component.Alias{}, err
+		}
+		return component.Alias{
+			Kind:          component.AliasKind(targetKind),
+			Sort:          aliasSort,
+			InstanceIndex: instanceIdx,
+			Name:          name,
+		}, nil
+
+	case component.AliasKindOuter:
+		outerCount, _, err := leb128.DecodeUint32(r)
+		if err != nil {
+			return component.Alias{}, fmt.Errorf("read outer count: %w", err)
+		}
+		outerIdx, _, err := leb128.DecodeUint32(r)
+		if err != nil {
+			return component.Alias{}, fmt.Errorf("read outer index: %w", err)
+		}
+		return component.Alias{
+			Kind:       component.AliasKindOuter,
+			Sort:       aliasSort,
+			OuterCount: outerCount,
+			OuterIndex: outerIdx,
+		}, nil
+
+	default:
+		return component.Alias{}, fmt.Errorf("unknown alias target kind: %#x", targetKind)
+	}
 }
 
 // decodeCanons decodes a vector of canonical function definitions.
@@ -500,15 +518,9 @@ func decodeComponentImports(r *bytes.Reader) ([]component.ComponentImport, error
 
 	imports := make([]component.ComponentImport, count)
 	for i := uint32(0); i < count; i++ {
-		name, _, err := decodeUTF8(r, "import name")
+		name, url, err := decodeExternName(r)
 		if err != nil {
-			return nil, err
-		}
-
-		// Optional URL
-		url, _, err := decodeUTF8(r, "import URL")
-		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read import name: %w", err)
 		}
 
 		desc, err := decodeExternDesc(r)
@@ -534,9 +546,9 @@ func decodeComponentExports(r *bytes.Reader) ([]component.ComponentExport, error
 
 	exports := make([]component.ComponentExport, count)
 	for i := uint32(0); i < count; i++ {
-		name, _, err := decodeUTF8(r, "export name")
+		name, url, err := decodeExternName(r)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read export name: %w", err)
 		}
 
 		kind, err := r.ReadByte()
@@ -551,16 +563,10 @@ func decodeComponentExports(r *bytes.Reader) ([]component.ComponentExport, error
 
 		export := component.ComponentExport{
 			Name:  name,
+			URL:   url,
 			Kind:  component.ExternDescKind(kind),
 			Index: idx,
 		}
-
-		// Optional URL.
-		url, _, err := decodeUTF8(r, "export URL")
-		if err != nil {
-			return nil, err
-		}
-		export.URL = url
 
 		// Optional type ascription.
 		hasType, err := r.ReadByte()
@@ -581,6 +587,69 @@ func decodeComponentExports(r *bytes.Reader) ([]component.ComponentExport, error
 	return exports, nil
 }
 
+// decodeExternName decodes a component model extern name (externname).
+// Format: kind:byte name:string [url:string]
+//   - 0x00: kebab-name (just a string)
+//   - 0x01: URL (string is the URL)
+//   - 0x02: kebab-name with URL integrity
+//   - 0x03: hashed kebab-name
+//   - 0x04: URL with integrity
+func decodeExternName(r *bytes.Reader) (name string, url string, err error) {
+	kind, err := r.ReadByte()
+	if err != nil {
+		return "", "", fmt.Errorf("read externname kind: %w", err)
+	}
+
+	switch kind {
+	case 0x00: // kebab-name
+		n, _, err := decodeUTF8(r, "externname")
+		if err != nil {
+			return "", "", err
+		}
+		return n, "", nil
+
+	case 0x01: // URL
+		u, _, err := decodeUTF8(r, "externname URL")
+		if err != nil {
+			return "", "", err
+		}
+		return u, u, nil
+
+	case 0x02: // kebab-name + URL integrity
+		n, _, err := decodeUTF8(r, "externname")
+		if err != nil {
+			return "", "", err
+		}
+		u, _, err := decodeUTF8(r, "externname URL")
+		if err != nil {
+			return "", "", err
+		}
+		return n, u, nil
+
+	case 0x03: // hashed kebab-name
+		n, _, err := decodeUTF8(r, "externname")
+		if err != nil {
+			return "", "", err
+		}
+		return n, "", nil
+
+	case 0x04: // URL with integrity
+		u, _, err := decodeUTF8(r, "externname URL")
+		if err != nil {
+			return "", "", err
+		}
+		integrity, _, err := decodeUTF8(r, "externname integrity")
+		if err != nil {
+			return "", "", err
+		}
+		_ = integrity
+		return u, u, nil
+
+	default:
+		return "", "", fmt.Errorf("unknown externname kind: %#x", kind)
+	}
+}
+
 // decodeExternDesc decodes a component external description (import/export type).
 func decodeExternDesc(r *bytes.Reader) (component.ExternDesc, error) {
 	kind, err := r.ReadByte()
@@ -591,10 +660,21 @@ func decodeExternDesc(r *bytes.Reader) (component.ExternDesc, error) {
 	desc := component.ExternDesc{Kind: component.ExternDescKind(kind)}
 
 	switch component.ExternDescKind(kind) {
-	case component.ExternDescKindModule,
-		component.ExternDescKindFunc,
+	case component.ExternDescKindModule:
+		// Module extern desc has a sub-byte (0x11 for module type index).
+		subKind, err := r.ReadByte()
+		if err != nil {
+			return desc, fmt.Errorf("read module extern desc sub-kind: %w", err)
+		}
+		_ = subKind // typically 0x11
+		idx, _, err := leb128.DecodeUint32(r)
+		if err != nil {
+			return desc, fmt.Errorf("read extern desc index: %w", err)
+		}
+		desc.TypeIndex = idx
+
+	case component.ExternDescKindFunc,
 		component.ExternDescKindValue,
-		component.ExternDescKindType,
 		component.ExternDescKindComponent,
 		component.ExternDescKindInstance:
 		idx, _, err := leb128.DecodeUint32(r)
@@ -602,6 +682,26 @@ func decodeExternDesc(r *bytes.Reader) (component.ExternDesc, error) {
 			return desc, fmt.Errorf("read extern desc index: %w", err)
 		}
 		desc.TypeIndex = idx
+
+	case component.ExternDescKindType:
+		// Type extern desc uses type bounds: 0x00 idx (eq) or 0x01 (sub resource).
+		bound, err := r.ReadByte()
+		if err != nil {
+			return desc, fmt.Errorf("read type bound: %w", err)
+		}
+		desc.TypeBound = component.TypeBound(bound)
+		switch component.TypeBound(bound) {
+		case component.TypeBoundEq:
+			idx, _, err := leb128.DecodeUint32(r)
+			if err != nil {
+				return desc, fmt.Errorf("read type bound eq index: %w", err)
+			}
+			desc.TypeIndex = idx
+		case component.TypeBoundSub:
+			desc.IsSubResource = true
+		default:
+			return desc, fmt.Errorf("unknown type bound: %#x", bound)
+		}
 
 	default:
 		return desc, fmt.Errorf("unknown extern desc kind: %#x", kind)

@@ -234,13 +234,19 @@ const (
 
 // ComponentTypeDecl describes a component type inline declaration.
 type ComponentTypeDecl struct {
-	Imports []ComponentImport
-	Exports []ComponentExport
+	CoreTypes []wasm.FunctionType
+	Types     []ComponentDefinedType
+	Aliases   []Alias
+	Imports   []ComponentImport
+	Exports   []ComponentExport
 }
 
 // InstanceTypeDecl describes an instance type inline declaration.
 type InstanceTypeDecl struct {
-	Exports []ComponentExport
+	CoreTypes []wasm.FunctionType
+	Types     []ComponentDefinedType
+	Aliases   []Alias
+	Exports   []ComponentExport
 }
 
 // ResourceType represents a resource type declaration.
@@ -254,9 +260,19 @@ type ExternDesc struct {
 	Kind ExternDescKind
 
 	// One of the following depending on Kind:
-	TypeIndex uint32            // for Func, Type, Component, Instance
-	CoreType  *wasm.FunctionType // for CoreFunc
+	TypeIndex      uint32            // for Func, Type, Component, Instance
+	CoreType       *wasm.FunctionType // for CoreFunc
+	TypeBound      TypeBound         // for Type kind - eq or sub resource
+	IsSubResource  bool              // true when TypeBound is sub(resource)
 }
+
+// TypeBound indicates how a type export is bound.
+type TypeBound byte
+
+const (
+	TypeBoundEq  TypeBound = 0x00 // eq(idx) - equal to another type
+	TypeBoundSub TypeBound = 0x01 // sub(resource) - subtype of resource
+)
 
 // ExternDescKind indicates what kind of external item this is.
 type ExternDescKind byte

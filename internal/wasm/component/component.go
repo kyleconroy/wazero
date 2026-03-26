@@ -199,8 +199,9 @@ type Alias struct {
 type AliasKind byte
 
 const (
-	AliasKindInstanceExport AliasKind = 0x00
-	AliasKindOuter          AliasKind = 0x01
+	AliasKindInstanceExport     AliasKind = 0x00 // component instance export
+	AliasKindCoreInstanceExport AliasKind = 0x01 // core instance export
+	AliasKindOuter              AliasKind = 0x02 // outer alias
 )
 
 // AliasSort indicates the sort of item being aliased.
