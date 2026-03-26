@@ -67,6 +67,9 @@ type Component struct {
 	// CoreModules contains the core WebAssembly modules embedded in this component.
 	CoreModules []*wasm.Module
 
+	// CoreModuleBytes contains the raw bytes of each core module for re-compilation.
+	CoreModuleBytes [][]byte
+
 	// CoreInstances contains core module instantiation instructions.
 	CoreInstances []CoreInstance
 
@@ -100,8 +103,23 @@ type Component struct {
 	// CustomSections contains any custom sections.
 	CustomSections []*wasm.CustomSection
 
+	// SectionOrder records the order in which sections were decoded.
+	// Each entry identifies a section ID and the index within the corresponding
+	// array (e.g., SectionIDType with Index=3 means Types[3]).
+	// The instantiation engine replays sections in this order to correctly
+	// build up index spaces.
+	SectionOrder []SectionOrderEntry
+
 	// ID is the sha256 hash of the binary for caching.
 	ID ComponentID
+}
+
+// SectionOrderEntry records a section that was decoded and its index
+// within the corresponding array in the Component struct.
+type SectionOrderEntry struct {
+	SectionID SectionID
+	Index     int
+	Count     int // number of items added in this section
 }
 
 // CoreInstance represents a core module instantiation.

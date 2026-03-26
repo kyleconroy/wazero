@@ -76,56 +76,76 @@ func DecodeComponent(
 			if err != nil {
 				return nil, fmt.Errorf("section core-module: %w", err)
 			}
+			idx := len(c.CoreModules)
 			c.CoreModules = append(c.CoreModules, mod)
+			// Store the raw bytes for re-compilation during instantiation.
+			rawBytes := make([]byte, len(sectionData))
+			copy(rawBytes, sectionData)
+			c.CoreModuleBytes = append(c.CoreModuleBytes, rawBytes)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: 1})
 
 		case component.SectionIDCoreInstance:
 			instances, err := decodeCoreInstances(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section core-instance: %w", err)
 			}
+			idx := len(c.CoreInstances)
 			c.CoreInstances = append(c.CoreInstances, instances...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(instances)})
 
 		case component.SectionIDCoreType:
 			types, err := decodeCoreTypes(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section core-type: %w", err)
 			}
+			idx := len(c.CoreTypes)
 			c.CoreTypes = append(c.CoreTypes, types...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(types)})
 
 		case component.SectionIDComponent:
 			nested, err := DecodeComponent(sectionData, enabledFeatures, memoryLimitPages, memoryCapacityFromMax)
 			if err != nil {
 				return nil, fmt.Errorf("section component: %w", err)
 			}
+			idx := len(c.Components)
 			c.Components = append(c.Components, nested)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: 1})
 
 		case component.SectionIDInstance:
 			instances, err := decodeInstances(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section instance: %w", err)
 			}
+			idx := len(c.Instances)
 			c.Instances = append(c.Instances, instances...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(instances)})
 
 		case component.SectionIDAlias:
 			aliases, err := decodeAliases(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section alias: %w", err)
 			}
+			idx := len(c.Aliases)
 			c.Aliases = append(c.Aliases, aliases...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(aliases)})
 
 		case component.SectionIDType:
 			types, err := decodeComponentTypes(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section type: %w", err)
 			}
+			idx := len(c.Types)
 			c.Types = append(c.Types, types...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(types)})
 
 		case component.SectionIDCanon:
 			canons, err := decodeCanons(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section canon: %w", err)
 			}
+			idx := len(c.Canons)
 			c.Canons = append(c.Canons, canons...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(canons)})
 
 		case component.SectionIDStart:
 			start, err := decodeComponentStart(sr)
@@ -133,20 +153,25 @@ func DecodeComponent(
 				return nil, fmt.Errorf("section start: %w", err)
 			}
 			c.Start = start
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: 0, Count: 1})
 
 		case component.SectionIDImport:
 			imports, err := decodeComponentImports(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section import: %w", err)
 			}
+			idx := len(c.Imports)
 			c.Imports = append(c.Imports, imports...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(imports)})
 
 		case component.SectionIDExport:
 			exports, err := decodeComponentExports(sr)
 			if err != nil {
 				return nil, fmt.Errorf("section export: %w", err)
 			}
+			idx := len(c.Exports)
 			c.Exports = append(c.Exports, exports...)
+			c.SectionOrder = append(c.SectionOrder, component.SectionOrderEntry{SectionID: sectionID, Index: idx, Count: len(exports)})
 
 		default:
 			return nil, fmt.Errorf("unknown component section id: %#x", sectionID)
