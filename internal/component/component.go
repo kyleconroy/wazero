@@ -235,8 +235,9 @@ type Alias struct {
 type AliasKind byte
 
 const (
-	AliasKindInstanceExport AliasKind = 0x00
-	AliasKindOuter          AliasKind = 0x01
+	AliasKindInstanceExport     AliasKind = 0x00
+	AliasKindCoreInstanceExport AliasKind = 0x01
+	AliasKindOuter              AliasKind = 0x02
 )
 
 // AliasTarget identifies the target of an alias.
