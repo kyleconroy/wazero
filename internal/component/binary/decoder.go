@@ -39,13 +39,12 @@ func IsComponent(data []byte) bool {
 }
 
 // Component section IDs in the binary format.
+// See https://github.com/WebAssembly/component-model/blob/main/design/mvp/Binary.md
 const (
-	// Core sections (0x00-0x0b) reuse core module section IDs.
-	sectionCoreModule    byte = 0x00
-	sectionCoreInstance  byte = 0x01
-	sectionCoreType      byte = 0x02
-
-	// Component sections use higher IDs.
+	sectionCustom            byte = 0x00
+	sectionCoreModule        byte = 0x01
+	sectionCoreInstance      byte = 0x02
+	sectionCoreType          byte = 0x03
 	sectionComponent         byte = 0x04
 	sectionComponentInstance byte = 0x05
 	sectionAlias             byte = 0x06
@@ -94,6 +93,19 @@ func DecodeComponent(data []byte) (*component.Component, error) {
 		sr := bytes.NewReader(payload)
 
 		switch sectionID {
+		case sectionCustom:
+			// Custom sections: read name and store.
+			name, err := decodeName(sr)
+			if err != nil {
+				name = fmt.Sprintf("custom-0x%02x", sectionID)
+			}
+			remaining := make([]byte, sr.Len())
+			_, _ = io.ReadFull(sr, remaining)
+			c.CustomSections = append(c.CustomSections, component.CustomSection{
+				Name: name,
+				Data: remaining,
+			})
+
 		case sectionCoreModule:
 			mod, err := decodeCoreModule(sr, sectionSize)
 			if err != nil {
@@ -150,12 +162,21 @@ func DecodeComponent(data []byte) (*component.Component, error) {
 			}
 			c.Instances = append(c.Instances, instances...)
 
+		case sectionCoreType:
+			// Core type sections: skip for now.
+
 		case sectionComponent:
-			// Nested component: skip for now, store as custom data.
-			c.CustomSections = append(c.CustomSections, component.CustomSection{
-				Name: "component",
-				Data: payload,
-			})
+			// Nested component: decode recursively.
+			nested, err := DecodeComponent(payload)
+			if err != nil {
+				// Store as raw data if we can't decode.
+				c.CustomSections = append(c.CustomSections, component.CustomSection{
+					Name: "component",
+					Data: payload,
+				})
+			} else {
+				c.NestedComponents = append(c.NestedComponents, *nested)
+			}
 
 		default:
 			// Unknown or custom sections are stored but not decoded further.

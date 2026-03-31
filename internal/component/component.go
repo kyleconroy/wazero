@@ -38,6 +38,9 @@ type Component struct {
 	// Aliases contains alias definitions that refer to exports of other instances.
 	Aliases []Alias
 
+	// NestedComponents contains components nested within this component.
+	NestedComponents []Component
+
 	// CustomSections are the inlined custom sections in the component.
 	CustomSections []CustomSection
 }
