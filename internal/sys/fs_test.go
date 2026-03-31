@@ -214,39 +214,32 @@ func TestFSContext_Renumber(t *testing.T) {
 
 	defer fsc.Close()
 
-	for _, toFd := range []int32{10, 100, 100} {
-		fromFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
-		require.EqualErrno(t, 0, errno)
+	// Open two files, then renumber one to the other's fd.
+	fromFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+	require.EqualErrno(t, 0, errno)
+	toFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+	require.EqualErrno(t, 0, errno)
 
-		prevDirFile, ok := fsc.LookupFile(fromFd)
-		require.True(t, ok)
+	prevDirFile, ok := fsc.LookupFile(fromFd)
+	require.True(t, ok)
 
-		require.EqualErrno(t, 0, fsc.Renumber(fromFd, toFd))
+	require.EqualErrno(t, 0, fsc.Renumber(fromFd, toFd))
 
-		renumberedDirFile, ok := fsc.LookupFile(toFd)
-		require.True(t, ok)
+	renumberedDirFile, ok := fsc.LookupFile(toFd)
+	require.True(t, ok)
 
-		require.Equal(t, prevDirFile, renumberedDirFile)
+	require.Equal(t, prevDirFile, renumberedDirFile)
 
-		// Previous file descriptor shouldn't be used.
-		_, ok = fsc.LookupFile(fromFd)
-		require.False(t, ok)
-	}
+	// Previous file descriptor shouldn't be used.
+	_, ok = fsc.LookupFile(fromFd)
+	require.False(t, ok)
 
 	t.Run("errors", func(t *testing.T) {
-		// Sanity check for 3 being preopen.
-		preopen, ok := fsc.LookupFile(3)
-		require.True(t, ok)
-		require.True(t, preopen.IsPreopen)
-
-		// From is preopen.
-		require.Equal(t, sys.ENOTSUP, fsc.Renumber(3, 100))
-
 		// From does not exist.
 		require.Equal(t, sys.EBADF, fsc.Renumber(12345, 3))
 
-		// Both are preopen.
-		require.Equal(t, sys.ENOTSUP, fsc.Renumber(3, 3))
+		// To does not exist.
+		require.Equal(t, sys.EBADF, fsc.Renumber(toFd, 12345))
 	})
 }
 

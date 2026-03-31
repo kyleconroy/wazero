@@ -19,6 +19,18 @@ func utimens(path string, atim, mtim int64) experimentalsys.Errno {
 	return experimentalsys.UnwrapOSError(syscall.UtimesNano(path, times[:]))
 }
 
+func lutimens(path string, atim, mtim int64) experimentalsys.Errno {
+	times := timesToTimespecs(atim, mtim)
+	if times == nil {
+		return 0
+	}
+	pathPtr, err := syscall.BytePtrFromString(path)
+	if err != nil {
+		return experimentalsys.UnwrapOSError(err)
+	}
+	return experimentalsys.UnwrapOSError(utimensat(unix.AT_FDCWD, uintptr(unsafe.Pointer(pathPtr)), times, unix.AT_SYMLINK_NOFOLLOW))
+}
+
 // On linux, implement futimens via utimensat with the NUL path.
 func futimens(fd uintptr, atim, mtim int64) experimentalsys.Errno {
 	times := timesToTimespecs(atim, mtim)

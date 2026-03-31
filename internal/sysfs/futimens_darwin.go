@@ -17,6 +17,11 @@ func utimens(path string, atim, mtim int64) experimentalsys.Errno {
 	return experimentalsys.UnwrapOSError(syscall.UtimesNano(path, times[:]))
 }
 
+func lutimens(path string, atim, mtim int64) experimentalsys.Errno {
+	// Darwin doesn't easily support lutimens without CGO, fall back to utimens.
+	return utimens(path, atim, mtim)
+}
+
 func futimens(fd uintptr, atim, mtim int64) experimentalsys.Errno {
 	times := timesToTimespecs(atim, mtim)
 	if times == nil {

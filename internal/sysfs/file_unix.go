@@ -37,3 +37,13 @@ func writeFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	errno := sys.UnwrapOSError(err)
 	return n, errno
 }
+
+// pwriteFd exposes syscall.Pwrite, bypassing Go's O_APPEND restriction.
+func pwriteFd(fd uintptr, buf []byte, off int64) (int, sys.Errno) {
+	if len(buf) == 0 {
+		return 0, 0
+	}
+	n, err := syscall.Pwrite(int(fd), buf, off)
+	errno := sys.UnwrapOSError(err)
+	return n, errno
+}

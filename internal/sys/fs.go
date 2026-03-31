@@ -52,6 +52,19 @@ type FileEntry struct {
 	// File is always non-nil.
 	File sys.File
 
+	// FdFlags stores the WASI fdflags used when opening this file, so that
+	// fd_fdstat_get can report them back. Flags like FD_SYNC, FD_DSYNC,
+	// and FD_RSYNC are stored here since the File interface doesn't expose them.
+	FdFlags uint16
+
+	// RightsBase stores the WASI fs_rights_base for this fd, so that
+	// fd_fdstat_set_rights can restrict them and fd_fdstat_get can report them.
+	// A value of 0 means not yet initialized (use defaults).
+	RightsBase uint32
+
+	// RightsInheriting stores the WASI fs_rights_inheriting for this fd.
+	RightsInheriting uint32
+
 	// direntCache is nil until DirentCache was called.
 	direntCache *DirentCache
 }
@@ -290,19 +303,13 @@ func (c *FSContext) Renumber(from, to int32) sys.Errno {
 	fromFile, ok := c.openedFiles.Lookup(from)
 	if !ok || to < 0 {
 		return sys.EBADF
-	} else if fromFile.IsPreopen {
-		return sys.ENOTSUP
 	}
 
-	// If toFile is already open, we close it to prevent windows lock issues.
-	//
-	// The doc is unclear and other implementations do nothing for already-opened To FDs.
-	// https://github.com/WebAssembly/WASI/blob/snapshot-01/phases/snapshot/docs.md#-fd_renumberfd-fd-to-fd---errno
-	// https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi-common/src/snapshots/preview_1.rs#L531-L546
-	if toFile, ok := c.openedFiles.Lookup(to); ok {
-		if toFile.IsPreopen {
-			return sys.ENOTSUP
-		}
+	// The `to` file descriptor must already be open.
+	if toFile, ok := c.openedFiles.Lookup(to); !ok {
+		return sys.EBADF
+	} else {
+		// Close it to prevent resource leaks.
 		_ = toFile.File.Close()
 	}
 

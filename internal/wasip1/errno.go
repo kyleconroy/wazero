@@ -175,8 +175,9 @@ const (
 	// ErrnoXdev Cross-device link.
 	ErrnoXdev
 
-	// Note: ErrnoNotcapable was removed by WASI maintainers.
-	// See https://github.com/WebAssembly/wasi-libc/pull/294
+	// ErrnoNotcapable indicates capabilities insufficient.
+	// While removed from the WASI spec, it's still used by wasi-testsuite.
+	ErrnoNotcapable
 )
 
 var errnoToString = [...]string{
@@ -308,6 +309,8 @@ func ToErrno(errno sys.Errno) Errno {
 		return ErrnoPerm
 	case sys.EROFS:
 		return ErrnoRofs
+	case sys.ENOTCAPABLE:
+		return ErrnoNotcapable
 	default:
 		return ErrnoIo
 	}

@@ -65,7 +65,7 @@ func sockRecvFn(_ context.Context, mod api.Module, params []uint64) sys.Errno {
 	if e, ok := fsc.LookupFile(fd); !ok {
 		return sys.EBADF // Not open
 	} else if conn, ok = e.File.(socketapi.TCPConn); !ok {
-		return sys.EBADF // Not a conn
+		return sys.ENOTSOCK // Not a socket
 	}
 
 	if riFlags & ^(wasip1.RI_RECV_PEEK|wasip1.RI_RECV_WAITALL) != 0 {
@@ -140,7 +140,7 @@ func sockSendFn(_ context.Context, mod api.Module, params []uint64) sys.Errno {
 	if e, ok := fsc.LookupFile(fd); !ok {
 		return sys.EBADF // Not open
 	} else if conn, ok = e.File.(socketapi.TCPConn); !ok {
-		return sys.EBADF // Not a conn
+		return sys.ENOTSOCK // Not a socket
 	}
 
 	bufSize, errno := writev(mem, siData, siDataCount, conn.Write)
@@ -167,7 +167,7 @@ func sockShutdownFn(_ context.Context, mod api.Module, params []uint64) sys.Errn
 	if e, ok := fsc.LookupFile(fd); !ok {
 		return sys.EBADF // Not open
 	} else if conn, ok = e.File.(socketapi.TCPConn); !ok {
-		return sys.EBADF // Not a conn
+		return sys.ENOTSOCK // Not a socket
 	}
 
 	sysHow := 0

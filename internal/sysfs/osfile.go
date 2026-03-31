@@ -265,7 +265,15 @@ func (f *osFile) Write(buf []byte) (n int, errno experimentalsys.Errno) {
 
 // Pwrite implements the same method as documented on sys.File
 func (f *osFile) Pwrite(buf []byte, off int64) (n int, errno experimentalsys.Errno) {
-	if n, errno = pwrite(f.file, buf, off); errno != 0 {
+	if f.IsAppend() {
+		// Go's os.File.WriteAt returns an error for files opened with
+		// O_APPEND, but the WASI spec requires pwrite to work regardless.
+		// Use the platform-specific pwriteFd to bypass Go's restriction.
+		n, errno = pwriteFd(f.fd, buf, off)
+	} else {
+		n, errno = pwrite(f.file, buf, off)
+	}
+	if errno != 0 {
 		// Defer validation overhead until we've already had an error.
 		errno = fileError(f, f.closed, errno)
 	}
