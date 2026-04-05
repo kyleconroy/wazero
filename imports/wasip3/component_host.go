@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -315,12 +316,72 @@ func (h *ComponentHost) RegisterAll(cl *wazero.ComponentLinker) {
 	h.registerCLIp3(cl)
 	h.registerIO(cl)
 	h.registerFilesystem(cl)
+	h.registerHTTP(cl)
+	h.registerSockets(cl)
 	h.registerBuiltins(cl)
 	// Set the pre-callback hook to restore context before each callback invocation.
 	cl.SetPreCallbackHook(h.contextRestore)
 	// Set event source to deliver subtask events during the callback loop.
 	cl.SetEventSource(h.pollEvent)
+	// Set up the generic import handler for [async-lower], [stream-*], and [future-*] variants.
+	cl.SetImportHandler(h.genericImportHandler)
 }
+
+// genericImportHandler handles unregistered imports across all WASI modules.
+func (h *ComponentHost) genericImportHandler(moduleName, funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
+	// Handle stream/future plumbing for any WASI module.
+	if strings.HasPrefix(funcName, "[stream-") || strings.HasPrefix(funcName, "[future-") {
+		return h.streamFuturePlumbing(funcName, paramTypes, resultTypes)
+	}
+
+	// Handle [async-lower] variants.
+	if strings.HasPrefix(funcName, "[async-lower]") {
+		inner := funcName[len("[async-lower]"):]
+
+		// Delegate to filesystem-specific handler.
+		if strings.Contains(moduleName, "filesystem") {
+			return h.asyncLowerFS(inner, paramTypes, resultTypes)
+		}
+
+		// For [async-lower][stream-*] or [async-lower][future-*], use generic plumbing.
+		if strings.HasPrefix(inner, "[stream-") || strings.HasPrefix(inner, "[future-") {
+			return h.streamFuturePlumbing(inner, paramTypes, resultTypes)
+		}
+
+		// Delegate to sockets-specific async-lower handler.
+		if strings.Contains(moduleName, "sockets") {
+			fn := h.asyncLowerSockets(inner, paramTypes, resultTypes)
+			if fn != nil {
+				return fn
+			}
+		}
+
+		// Generic async-lower: synchronous completion returning RETURNED(2).
+		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+		})
+	}
+
+	// Delegate to filesystem import handler for filesystem modules.
+	if strings.Contains(moduleName, "filesystem") {
+		return h.filesystemImportHandler(moduleName, funcName, paramTypes, resultTypes)
+	}
+
+	// Delegate to HTTP import handler for HTTP modules.
+	if strings.Contains(moduleName, "http") {
+		return h.httpImportHandler(moduleName, funcName, paramTypes, resultTypes)
+	}
+
+	// Delegate to sockets import handler for sockets modules.
+	if strings.Contains(moduleName, "sockets") {
+		return h.socketsImportHandler(moduleName, funcName, paramTypes, resultTypes)
+	}
+
+	return nil
+}
+
 
 // pollEvent returns the next event for the callback loop.
 // It writes subtask results to guest memory before delivering the event.
@@ -345,8 +406,8 @@ func min(a, b int) int {
 
 // registerRandom registers wasi:random/* host functions.
 func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
-	// wasi:random/random@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:random/random@0.3.0-rc-2026-02-09", "get-random-u64",
+	// wasi:random/random
+	cl.DefineFunc("wasi:random/random@0.3.0-rc-2026-03-15", "get-random-u64",
 		nil, []api.ValueType{i64},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			var buf [8]byte
@@ -354,7 +415,7 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 			stack[0] = binary.LittleEndian.Uint64(buf[:])
 		}))
 
-	cl.DefineFunc("wasi:random/random@0.3.0-rc-2026-02-09", "get-random-bytes",
+	cl.DefineFunc("wasi:random/random@0.3.0-rc-2026-03-15", "get-random-bytes",
 		[]api.ValueType{i64, i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			length := uint32(stack[0])
@@ -364,8 +425,8 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 			writeListToMemory(ctx, mod, retPtr, buf)
 		}))
 
-	// wasi:random/insecure@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:random/insecure@0.3.0-rc-2026-02-09", "get-insecure-random-u64",
+	// wasi:random/insecure@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:random/insecure@0.3.0-rc-2026-03-15", "get-insecure-random-u64",
 		nil, []api.ValueType{i64},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			var buf [8]byte
@@ -373,7 +434,7 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 			stack[0] = binary.LittleEndian.Uint64(buf[:])
 		}))
 
-	cl.DefineFunc("wasi:random/insecure@0.3.0-rc-2026-02-09", "get-insecure-random-bytes",
+	cl.DefineFunc("wasi:random/insecure@0.3.0-rc-2026-03-15", "get-insecure-random-bytes",
 		[]api.ValueType{i64, i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			length := uint32(stack[0])
@@ -383,8 +444,8 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 			writeListToMemory(ctx, mod, retPtr, buf)
 		}))
 
-	// wasi:random/insecure-seed@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:random/insecure-seed@0.3.0-rc-2026-02-09", "get-insecure-seed",
+	// wasi:random/insecure-seed@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:random/insecure-seed@0.3.0-rc-2026-03-15", "get-insecure-seed",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
@@ -403,14 +464,14 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 
 // registerClocks registers wasi:clocks/* host functions.
 func (h *ComponentHost) registerClocks(cl *wazero.ComponentLinker) {
-	// wasi:clocks/monotonic-clock@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-02-09", "now",
+	// wasi:clocks/monotonic-clock@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-03-15", "now",
 		nil, []api.ValueType{i64},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			stack[0] = uint64(time.Now().UnixNano())
 		}))
 
-	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-02-09", "get-resolution",
+	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-03-15", "get-resolution",
 		nil, []api.ValueType{i64},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			stack[0] = 1 // 1ns resolution
@@ -419,7 +480,7 @@ func (h *ComponentHost) registerClocks(cl *wazero.ComponentLinker) {
 	// [async-lower]wait-for: async version, returns packed subtask status.
 	// Subtask.State: STARTING=0, STARTED=1, RETURNED=2
 	// Return value: state | (subtask_index << 4). For sync completion: just RETURNED=2.
-	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-02-09", "[async-lower]wait-for",
+	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-03-15", "[async-lower]wait-for",
 		[]api.ValueType{i64}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			duration := stack[0]
@@ -428,7 +489,7 @@ func (h *ComponentHost) registerClocks(cl *wazero.ComponentLinker) {
 		}))
 
 	// [async-lower]wait-until: async version
-	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-02-09", "[async-lower]wait-until",
+	cl.DefineFunc("wasi:clocks/monotonic-clock@0.3.0-rc-2026-03-15", "[async-lower]wait-until",
 		[]api.ValueType{i64}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			instant := stack[0]
@@ -439,8 +500,8 @@ func (h *ComponentHost) registerClocks(cl *wazero.ComponentLinker) {
 			stack[0] = 2 // RETURNED (synchronous completion)
 		}))
 
-	// wasi:clocks/system-clock@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:clocks/system-clock@0.3.0-rc-2026-02-09", "now",
+	// wasi:clocks/system-clock@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:clocks/system-clock@0.3.0-rc-2026-03-15", "now",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
@@ -454,7 +515,7 @@ func (h *ComponentHost) registerClocks(cl *wazero.ComponentLinker) {
 			mem.WriteUint32Le(retPtr+8, uint32(now.Nanosecond()))
 		}))
 
-	cl.DefineFunc("wasi:clocks/system-clock@0.3.0-rc-2026-02-09", "get-resolution",
+	cl.DefineFunc("wasi:clocks/system-clock@0.3.0-rc-2026-03-15", "get-resolution",
 		nil, []api.ValueType{i64},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			stack[0] = 1 // 1ns resolution
@@ -566,22 +627,22 @@ func (h *ComponentHost) registerCLI(cl *wazero.ComponentLinker) {
 
 // registerCLIp3 registers wasi:cli/* host functions (0.3.0-rc versions).
 func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
-	// wasi:cli/environment@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-02-09", "get-environment",
+	// wasi:cli/environment@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-03-15", "get-environment",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
 			writeStringPairListToMemory(ctx, mod, retPtr, h.env)
 		}))
 
-	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-02-09", "get-arguments",
+	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-03-15", "get-arguments",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
 			writeStringListToMemory(ctx, mod, retPtr, h.args)
 		}))
 
-	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-02-09", "get-initial-cwd",
+	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-03-15", "get-initial-cwd",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
@@ -593,8 +654,8 @@ func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
 			mem.WriteByte(retPtr, 0)
 		}))
 
-	// wasi:cli/exit@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/exit@0.3.0-rc-2026-02-09", "exit",
+	// wasi:cli/exit@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:cli/exit@0.3.0-rc-2026-03-15", "exit",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			resultDiscriminant := uint32(stack[0])
@@ -608,45 +669,39 @@ func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
 			panic(sys.NewExitError(exitCode))
 		}))
 
-	// wasi:cli/stdout@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/stdout@0.3.0-rc-2026-02-09", "write-via-stream",
-		[]api.ValueType{i32}, []api.ValueType{i32},
-		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			id := h.resources.New(&streamResource{writer: h.stdout})
-			stack[0] = uint64(id)
-		}))
+	// wasi:cli/stdout@0.3.0-rc-2026-03-15 - write-via-stream
+	// Returns tuple<stream<u8>, future<result<_, error-code>>>.
+	// Writes stream handle at retPtr+0, future handle at retPtr+4.
+	h.registerWriteViaStream(cl, "wasi:cli/stdout@0.3.0-rc-2026-03-15", h.stdout)
 
-	// wasi:cli/stderr@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/stderr@0.3.0-rc-2026-02-09", "write-via-stream",
-		[]api.ValueType{i32}, []api.ValueType{i32},
-		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			id := h.resources.New(&streamResource{writer: h.stderr})
-			stack[0] = uint64(id)
-		}))
+	// wasi:cli/stderr@0.3.0-rc-2026-03-15 - write-via-stream
+	h.registerWriteViaStream(cl, "wasi:cli/stderr@0.3.0-rc-2026-03-15", h.stderr)
 
-	// wasi:cli/stdin@0.3.0-rc-2026-02-09 - read-via-stream plus all async variants
-	cl.DefineFunc("wasi:cli/stdin@0.3.0-rc-2026-02-09", "read-via-stream",
+	// wasi:cli/stdin@0.3.0-rc-2026-03-15 - read-via-stream
+	// The stream and future handles are created by [stream-new-0] and [future-new-1] plumbing.
+	// This function just needs to exist; handles are written to retPtr by the shim.
+	cl.DefineFunc("wasi:cli/stdin@0.3.0-rc-2026-03-15", "read-via-stream",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			// No-op stub
+			// No-op: stream and future handles are managed by the component model plumbing.
 		}))
 
-	// wasi:cli/terminal-input@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/terminal-input@0.3.0-rc-2026-02-09", "[resource-drop]terminal-input",
+	// wasi:cli/terminal-input@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:cli/terminal-input@0.3.0-rc-2026-03-15", "[resource-drop]terminal-input",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			h.resources.Drop(uint32(stack[0]))
 		}))
 
-	// wasi:cli/terminal-output@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/terminal-output@0.3.0-rc-2026-02-09", "[resource-drop]terminal-output",
+	// wasi:cli/terminal-output@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:cli/terminal-output@0.3.0-rc-2026-03-15", "[resource-drop]terminal-output",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			h.resources.Drop(uint32(stack[0]))
 		}))
 
-	// wasi:cli/terminal-stdin@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/terminal-stdin@0.3.0-rc-2026-02-09", "get-terminal-stdin",
+	// wasi:cli/terminal-stdin@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:cli/terminal-stdin@0.3.0-rc-2026-03-15", "get-terminal-stdin",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
@@ -657,8 +712,8 @@ func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
 			mem.WriteByte(retPtr, 0) // none
 		}))
 
-	// wasi:cli/terminal-stdout@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/terminal-stdout@0.3.0-rc-2026-02-09", "get-terminal-stdout",
+	// wasi:cli/terminal-stdout@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:cli/terminal-stdout@0.3.0-rc-2026-03-15", "get-terminal-stdout",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
@@ -669,8 +724,8 @@ func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
 			mem.WriteByte(retPtr, 0) // none
 		}))
 
-	// wasi:cli/terminal-stderr@0.3.0-rc-2026-02-09
-	cl.DefineFunc("wasi:cli/terminal-stderr@0.3.0-rc-2026-02-09", "get-terminal-stderr",
+	// wasi:cli/terminal-stderr@0.3.0-rc-2026-03-15
+	cl.DefineFunc("wasi:cli/terminal-stderr@0.3.0-rc-2026-03-15", "get-terminal-stderr",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
@@ -866,10 +921,32 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 	taskReturnFn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		h.taskReturnValue.Store(int32(stack[0]))
 	})
-	for _, ver := range []string{"0.3.0-rc-2026-02-09", "0.3.0-rc-2026-03-15"} {
+	for _, ver := range []string{"0.3.0-rc-2026-03-15", "0.3.0-rc-2026-03-15"} {
 		cl.DefineFunc("[export]wasi:cli/run@"+ver, "[task-return]run",
 			[]api.ValueType{i32}, nil, taskReturnFn)
 	}
+}
+
+// registerWriteViaStream registers write-via-stream with the correct signature.
+// The wasm binary may import this with either (i32)->void or (i32)->(i32) signature
+// depending on the lowering. We register with (i32)->(i32) which is the superset;
+// the import handler will provide the void-return variant if needed.
+func (h *ComponentHost) registerWriteViaStream(cl *wazero.ComponentLinker, moduleName string, writer io.Writer) {
+	cl.DefineFunc(moduleName, "write-via-stream",
+		[]api.ValueType{i32}, []api.ValueType{i32},
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			retPtr := uint32(stack[0])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+			streamHandle := h.resources.New(&streamResource{writer: writer})
+			futureResult := make([]byte, 20) // result<_, error-code>: disc=0 (Ok)
+			futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
+			mem.WriteUint32Le(retPtr, streamHandle)
+			mem.WriteUint32Le(retPtr+4, futureHandle)
+			stack[0] = 0 // return 0 as status
+		}))
 }
 
 // ExitCode returns the exit code if exit() was called, or -1 if not.

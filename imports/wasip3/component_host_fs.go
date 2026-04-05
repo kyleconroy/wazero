@@ -1,6 +1,7 @@
 package wasip3
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -365,26 +366,16 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 		}
 	}
 
-	// Set up the import handler for [async-lower] and stream/future variants.
-	cl.SetImportHandler(h.filesystemImportHandler)
+	// Note: the generic import handler is set in RegisterAll, not here.
 }
 
 // filesystemImportHandler handles unregistered filesystem imports, particularly
 // [async-lower] variants that have different signatures from the base methods.
 func (h *ComponentHost) filesystemImportHandler(moduleName, funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
-	if !strings.Contains(moduleName, "filesystem") {
-		return nil
-	}
-
 	// Handle [async-lower] variants.
 	if strings.HasPrefix(funcName, "[async-lower]") {
 		inner := funcName[len("[async-lower]"):]
 		return h.asyncLowerFS(inner, paramTypes, resultTypes)
-	}
-
-	// Handle stream/future plumbing as no-ops.
-	if strings.HasPrefix(funcName, "[stream-") || strings.HasPrefix(funcName, "[future-") {
-		return h.streamFuturePlumbing(funcName, paramTypes, resultTypes)
 	}
 
 	return nil
@@ -1452,8 +1443,10 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
 	if strings.HasPrefix(funcName, "[stream-new-0]") {
 		// () -> i64: return a new stream pair (readable | writable << 32)
+		// Use a bytes.Buffer so data written to the writable end can be read from the readable end.
 		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			shared := &streamResource{}
+			buf := new(bytes.Buffer)
+			shared := &streamResource{reader: buf, writer: buf}
 			readHandle := h.resources.New(shared)
 			writeHandle := h.resources.New(shared)
 			stack[0] = uint64(readHandle) | (uint64(writeHandle) << 32)
@@ -1479,6 +1472,116 @@ func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, result
 	if strings.HasPrefix(funcName, "[stream-cancel-") || strings.HasPrefix(funcName, "[future-cancel-") {
 		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			stack[0] = 0 // no items consumed/produced
+		})
+	}
+
+	// Handle [stream-read-0]: guest reads from a readable stream.
+	// Signature: (stream_handle: i32, buf_ptr: i32, buf_len: i32) -> i32
+	// Return codes: COMPLETED(n)=(n<<4)|0, DROPPED(n)=(n<<4)|1, CANCELLED(n)=(n<<4)|2, BLOCKED=0xFFFFFFFF
+	if strings.HasPrefix(funcName, "[stream-read-0]") {
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			handle := uint32(stack[0])
+			bufPtr := uint32(stack[1])
+			bufLen := uint32(stack[2])
+			mem := mod.Memory()
+
+			res, ok := h.resources.Get(handle)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			sr, ok := res.(*streamResource)
+			if !ok || sr.reader == nil {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			if bufLen == 0 {
+				stack[0] = 0 // COMPLETED(0)
+				return
+			}
+			buf := make([]byte, bufLen)
+			n, err := sr.reader.Read(buf)
+			if n > 0 {
+				mem.Write(bufPtr, buf[:n])
+			}
+			if err != nil {
+				stack[0] = uint64(n<<4) | 0x1 // DROPPED(n)
+			} else {
+				stack[0] = uint64(n << 4) // COMPLETED(n)
+			}
+		})
+	}
+
+	// Handle [stream-write-0]: guest writes data to a writable stream.
+	// Signature: (stream_handle: i32, buf_ptr: i32, buf_len: i32) -> i32
+	if strings.HasPrefix(funcName, "[stream-write-0]") {
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			handle := uint32(stack[0])
+			bufPtr := uint32(stack[1])
+			bufLen := uint32(stack[2])
+			mem := mod.Memory()
+
+			res, ok := h.resources.Get(handle)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			sr, ok := res.(*streamResource)
+			if !ok || sr.writer == nil {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			if bufLen == 0 {
+				stack[0] = 0 // COMPLETED(0)
+				return
+			}
+			data, ok := mem.Read(bufPtr, bufLen)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			n, err := sr.writer.Write(data)
+			if err != nil {
+				stack[0] = uint64(n<<4) | 0x1 // DROPPED(n)
+			} else {
+				stack[0] = uint64(n << 4) // COMPLETED(n)
+			}
+		})
+	}
+
+	// Handle [future-read-1]: guest reads a future value.
+	// Signature: (future_handle: i32, ret_ptr: i32) -> i32
+	if strings.HasPrefix(funcName, "[future-read-1]") || strings.HasPrefix(funcName, "[future-read-2]") {
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			handle := uint32(stack[0])
+			retPtr := uint32(stack[1])
+			mem := mod.Memory()
+
+			res, ok := h.resources.Get(handle)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			fr, ok := res.(*futureResource)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			if !fr.ready {
+				stack[0] = 0xFFFFFFFF // BLOCKED
+				return
+			}
+			if fr.result != nil {
+				mem.Write(retPtr, fr.result)
+			}
+			stack[0] = 0 // COMPLETED(0)
+		})
+	}
+
+	// Handle [future-write-1] / [future-write-2]: host writes a future value.
+	if strings.HasPrefix(funcName, "[future-write-1]") || strings.HasPrefix(funcName, "[future-write-2]") {
+		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			stack[0] = 0 // COMPLETED(0)
 		})
 	}
 
