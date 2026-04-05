@@ -55,6 +55,12 @@ func (rt *ResourceTable) Get(id uint32) (interface{}, bool) {
 	return v, ok
 }
 
+func (rt *ResourceTable) Set(id uint32, val interface{}) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.entries[id] = val
+}
+
 func (rt *ResourceTable) Drop(id uint32) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -105,6 +111,9 @@ type ComponentHost struct {
 
 	// pendingOps tracks the number of pending background operations.
 	pendingOps atomic.Int32
+
+	// ctx is the context passed during setup, used for cabiRealloc calls in pollEvent.
+	ctx context.Context
 }
 
 // asyncEvent represents a waitable-set-poll event.
@@ -116,9 +125,10 @@ type asyncEvent struct {
 
 // subtask represents a pending async-lower subtask.
 type subtask struct {
-	retPtr  uint32 // where to write results in guest memory
-	results []byte // the serialized results to write
-	ready   bool   // whether the subtask has completed
+	retPtr    uint32                // where to write results in guest memory
+	results   []byte                // the serialized results to write
+	resultsFn func(context.Context, api.Module) // called to write results (for list allocation)
+	ready     bool                  // whether the subtask has completed
 }
 
 // subtaskTable manages subtask indices and pending results.
@@ -138,6 +148,31 @@ func (st *subtaskTable) New(retPtr uint32, results []byte) uint32 {
 	idx := st.nextIdx
 	st.entries[idx] = &subtask{retPtr: retPtr, results: results, ready: true}
 	return idx
+}
+
+// NewPending creates a subtask that is not yet ready.
+// Call Complete() to mark it ready and provide results.
+func (st *subtaskTable) NewPending(retPtr uint32) uint32 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.entries == nil {
+		st.entries = make(map[uint32]*subtask)
+	}
+	st.nextIdx++
+	idx := st.nextIdx
+	st.entries[idx] = &subtask{retPtr: retPtr, ready: false}
+	return idx
+}
+
+// Complete marks a pending subtask as ready with its results.
+func (st *subtaskTable) Complete(idx uint32, results []byte, resultsFn func(context.Context, api.Module)) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if s, ok := st.entries[idx]; ok {
+		s.results = results
+		s.resultsFn = resultsFn
+		s.ready = true
+	}
 }
 
 func (st *subtaskTable) PopReady() (uint32, *subtask) {
@@ -206,6 +241,7 @@ func NewComponentHost(stdin io.Reader, stdout, stderr io.Writer, args []string, 
 		env:         env,
 		randSource:  rand.Reader,
 		asyncEvents: make(chan asyncEvent, 64),
+		ctx:         context.Background(),
 	}
 }
 
@@ -347,9 +383,10 @@ func (h *ComponentHost) RegisterAll(cl *wazero.ComponentLinker) {
 
 // genericImportHandler handles unregistered imports across all WASI modules.
 func (h *ComponentHost) genericImportHandler(moduleName, funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
+	// Handle unregistered imports across all WASI modules.
 	// Handle stream/future plumbing for any WASI module.
 	if strings.HasPrefix(funcName, "[stream-") || strings.HasPrefix(funcName, "[future-") {
-		return h.streamFuturePlumbing(funcName, paramTypes, resultTypes)
+		return h.streamFuturePlumbing(moduleName, funcName, paramTypes, resultTypes)
 	}
 
 	// Handle [async-lower] variants.
@@ -363,7 +400,7 @@ func (h *ComponentHost) genericImportHandler(moduleName, funcName string, paramT
 
 		// For [async-lower][stream-*] or [async-lower][future-*], use generic plumbing.
 		if strings.HasPrefix(inner, "[stream-") || strings.HasPrefix(inner, "[future-") {
-			return h.streamFuturePlumbing(inner, paramTypes, resultTypes)
+			return h.streamFuturePlumbing(moduleName, inner, paramTypes, resultTypes)
 		}
 
 		// Delegate to sockets-specific async-lower handler.
@@ -407,7 +444,9 @@ func (h *ComponentHost) pollEvent(mod api.Module) (uint32, uint32, uint32) {
 	// Check for subtask events first.
 	idx, st := h.subtasks.PopReady()
 	if st != nil {
-		if mem := mod.Memory(); mem != nil && st.results != nil {
+		if st.resultsFn != nil {
+			st.resultsFn(h.ctx, mod)
+		} else if mem := mod.Memory(); mem != nil && st.results != nil {
 			mem.Write(st.retPtr, st.results)
 		}
 		return 1, idx, 2 // SUBTASK event, subtask index, RETURNED state
@@ -706,12 +745,21 @@ func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
 	h.registerWriteViaStream(cl, "wasi:cli/stderr@0.3.0-rc-2026-03-15", h.stderr)
 
 	// wasi:cli/stdin@0.3.0-rc-2026-03-15 - read-via-stream
-	// The stream and future handles are created by [stream-new-0] and [future-new-1] plumbing.
-	// This function just needs to exist; handles are written to retPtr by the shim.
+	// Returns tuple<stream<u8>, future<result<_, error-code>>>.
+	// Writes stream handle at retPtr+0, future handle at retPtr+4.
 	cl.DefineFunc("wasi:cli/stdin@0.3.0-rc-2026-03-15", "read-via-stream",
 		[]api.ValueType{i32}, nil,
-		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			// No-op: stream and future handles are managed by the component model plumbing.
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			retPtr := uint32(stack[0])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+			streamHandle := h.resources.New(&streamResource{reader: h.stdin})
+			futureResult := make([]byte, 20) // result<_, error-code>: disc=0 (Ok)
+			futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
+			mem.WriteUint32Le(retPtr, streamHandle)
+			mem.WriteUint32Le(retPtr+4, futureHandle)
 		}))
 
 	// wasi:cli/terminal-input@0.3.0-rc-2026-03-15
@@ -954,25 +1002,27 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 	}
 }
 
-// registerWriteViaStream registers write-via-stream with the correct signature.
-// The wasm binary may import this with either (i32)->void or (i32)->(i32) signature
-// depending on the lowering. We register with (i32)->(i32) which is the superset;
-// the import handler will provide the void-return variant if needed.
+// registerWriteViaStream registers write-via-stream for a P3 CLI output stream.
+// write-via-stream(data: stream<u8>) -> future<result<_, error-code>>
+// Lowered: (i32) -> (i32) where param = stream readable handle, return = future readable handle.
 func (h *ComponentHost) registerWriteViaStream(cl *wazero.ComponentLinker, moduleName string, writer io.Writer) {
 	cl.DefineFunc(moduleName, "write-via-stream",
 		[]api.ValueType{i32}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
-			retPtr := uint32(stack[0])
-			mem := mod.Memory()
-			if mem == nil {
-				return
+			streamHandle := uint32(stack[0])
+			// Connect the stream to the actual writer (stdout/stderr).
+			// The stream handle is the readable end from [stream-new-0].
+			// Both readable and writable handles share the same streamResource,
+			// so setting writer here makes [stream-write-0] on the writable end
+			// write directly to the output.
+			if res, ok := h.resources.Get(streamHandle); ok {
+				if sr, ok := res.(*streamResource); ok {
+					sr.writer = writer
+				}
 			}
-			streamHandle := h.resources.New(&streamResource{writer: writer})
-			futureResult := make([]byte, 20) // result<_, error-code>: disc=0 (Ok)
-			futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
-			mem.WriteUint32Le(retPtr, streamHandle)
-			mem.WriteUint32Le(retPtr+4, futureHandle)
-			stack[0] = 0 // return 0 as status
+			// Return 0 as the future handle. The guest treats this as the readable
+			// end of the future for the result.
+			stack[0] = 0
 		}))
 }
 

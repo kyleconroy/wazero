@@ -18,6 +18,15 @@ var boundAddresses sync.Map // string -> bool
 // activeListeners tracks simulated IPv6 listener addresses and their accept channels.
 var activeListeners sync.Map // string -> chan net.Conn
 
+// udpDatagram represents a simulated UDP datagram for IPv6 sockets.
+type udpDatagram struct {
+	data   []byte
+	sender *net.UDPAddr
+}
+
+// udpMailboxes maps bound UDP addresses to their receive channels for simulated IPv6.
+var udpMailboxes sync.Map // string -> chan udpDatagram
+
 // tcpSocketResource represents a TCP socket.
 type tcpSocketResource struct {
 	mu        sync.Mutex
@@ -123,11 +132,65 @@ const (
 	errAddressNotBindable = 6
 	errAddressInUse       = 7
 	errConnectionRefused  = 9
+	errDatagramTooLarge   = 13
 )
 
 // registerSockets is a no-op; all socket functions are handled dynamically by
 // socketsImportHandler to avoid signature mismatches with the flat ABI lowering.
 func (h *ComponentHost) registerSockets(cl *wazero.ComponentLinker) {}
+
+// writeUDPReceiveResult writes a successful receive result to retPtr.
+// Result layout: result<tuple<list<u8>, ip-socket-address>, error-code>
+//   +0:  disc=0 (ok)
+//   +4:  list ptr (u32) - allocated via cabi_realloc
+//   +8:  list len (u32)
+//   +12: ip-socket-address disc (u8) - 0=IPv4, 1=IPv6
+//   For IPv4: +16: port(u16), +18: a,b,c,d
+//   For IPv6: +16: port(u16), +20: flow-info(u32), +24: addr(u16×8), +40: scope-id(u32)
+func writeUDPReceiveResult(ctx context.Context, mod api.Module, retPtr uint32, data []byte, addr *net.UDPAddr) {
+	mem := mod.Memory()
+	if mem == nil {
+		return
+	}
+	mem.WriteByte(retPtr, 0) // ok disc
+
+	// Write data list using cabi_realloc.
+	if len(data) > 0 {
+		ptr, err := cabiRealloc(ctx, mod, uint32(len(data)))
+		if err == nil {
+			mem.Write(ptr, data)
+			mem.WriteUint32Le(retPtr+4, ptr)
+		}
+	} else {
+		mem.WriteUint32Le(retPtr+4, 0)
+	}
+	mem.WriteUint32Le(retPtr+8, uint32(len(data)))
+
+	// Write ip-socket-address.
+	if addr == nil {
+		mem.WriteByte(retPtr+12, 0) // IPv4 default
+		return
+	}
+	ip4 := addr.IP.To4()
+	if ip4 != nil {
+		mem.WriteByte(retPtr+12, 0) // IPv4
+		mem.WriteUint16Le(retPtr+16, uint16(addr.Port))
+		mem.WriteByte(retPtr+18, ip4[0])
+		mem.WriteByte(retPtr+19, ip4[1])
+		mem.WriteByte(retPtr+20, ip4[2])
+		mem.WriteByte(retPtr+21, ip4[3])
+	} else {
+		ip6 := addr.IP.To16()
+		mem.WriteByte(retPtr+12, 1) // IPv6
+		mem.WriteUint16Le(retPtr+16, uint16(addr.Port))
+		mem.WriteUint32Le(retPtr+20, 0) // flow-info
+		for i := 0; i < 8; i++ {
+			seg := uint16(ip6[i*2])<<8 | uint16(ip6[i*2+1])
+			mem.WriteUint16Le(retPtr+24+uint32(i)*2, seg)
+		}
+		mem.WriteUint32Le(retPtr+40, 0) // scope-id
+	}
+}
 
 // asyncLowerSockets handles [async-lower] variants for socket functions.
 // The async-lower form passes params through memory: (params_ptr: i32, retPtr: i32) -> i32.
@@ -380,29 +443,28 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 		})
 
 	case "[method]udp-socket.send":
-		// send: func(data: list<datagram>) -> result<_, error-code>
-		// Async-lower: params depend on how many fit flat.
-		// If len(paramTypes) == 2: spilled (params_ptr, retPtr)
-		// If len(paramTypes) > 2: direct (self, list_ptr, list_len, retPtr)
-		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
-			retPtr := uint32(stack[len(paramTypes)-1])
+		// send: async func(data: list<u8>, remote-address: option<ip-socket-address>) -> result<_, error-code>
+		// Async-lower: always spilled (params_ptr: i32, retPtr: i32) -> i32
+		// Params layout in memory at paramsPtr:
+		//   +0:  self (u32)
+		//   +4:  data.ptr (u32)
+		//   +8:  data.len (u32)
+		//   +12: option disc (u8) - 0=None, 1=Some
+		//   +16: ip-socket-address disc (u8) - 0=IPv4, 1=IPv6
+		//   For IPv4: +20: port(u16), +22: a,b,c,d
+		//   For IPv6: +20: port(u16), +24: flow-info(u32), +28: addr(u16×8), +44: scope-id(u32)
+		return api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			paramsPtr := uint32(stack[0])
+			retPtr := uint32(stack[1])
 			mem := mod.Memory()
 			if mem == nil {
 				return
 			}
 
-			var self uint32
-			var paramsPtr uint32
-			if len(paramTypes) == 2 {
-				// Spilled: params in memory.
-				paramsPtr = uint32(stack[0])
-				self, _ = mem.ReadUint32Le(paramsPtr)
-			} else {
-				// Direct params on stack.
-				self = uint32(stack[0])
-			}
-			// list<datagram>: ptr at paramsPtr+4, len at paramsPtr+8
-			// Each datagram has: data(ptr, len) + remote-address(optional variant)
+			self, _ := mem.ReadUint32Le(paramsPtr)
+			dataPtr, _ := mem.ReadUint32Le(paramsPtr + 4)
+			dataLen, _ := mem.ReadUint32Le(paramsPtr + 8)
+			optionDisc, _ := mem.ReadByte(paramsPtr + 12)
 
 			res, ok := h.resources.Get(self)
 			if !ok {
@@ -415,52 +477,147 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 			sock.mu.Lock()
 			conn := sock.conn
 			remoteAddr := sock.remoteAddr
+			family := sock.family
 			sock.mu.Unlock()
 
-			if conn == nil {
-				mem.WriteByte(retPtr, 1)
-				mem.WriteByte(retPtr+4, errInvalidState)
-				stack[0] = 2
-				return
-			}
-
-			// Read the datagram list.
-			var listPtr, listLen uint32
-			if len(paramTypes) == 2 {
-				listPtr, _ = mem.ReadUint32Le(paramsPtr + 4)
-				listLen, _ = mem.ReadUint32Le(paramsPtr + 8)
-			} else {
-				listPtr = uint32(stack[1])
-				listLen = uint32(stack[2])
-			}
-
-			// Each datagram struct in memory:
-			// data_ptr(4) + data_len(4) + remote_address(ip-socket-address variant)
-			// ip-socket-address: disc(1 byte, padded to 4) + payload
-			// ipv4 payload: port(u16) + pad(2) + addr(4) = 8 bytes
-			// ipv6 payload: port(u16) + pad(2) + flow-info(u32) + addr(16) + scope-id(u32) = 28 bytes
-			const datagramSize = 36 // data_ptr(4) + data_len(4) + addr_disc(4) + ipv6_payload(24 padded)
-			for i := uint32(0); i < listLen; i++ {
-				entryBase := listPtr + i*datagramSize
-				dataPtr, _ := mem.ReadUint32Le(entryBase)
-				dataLen, _ := mem.ReadUint32Le(entryBase + 4)
-
-				// Check remote address family (disc byte at offset 8).
-				addrDisc, _ := mem.ReadByte(entryBase + 8)
-				expectedDisc := byte(sock.family)
-				if addrDisc != expectedDisc {
+			var targetAddr *net.UDPAddr
+			if optionDisc == 1 {
+				// Some(ip-socket-address)
+				addrDisc, _ := mem.ReadByte(paramsPtr + 16)
+				// Validate address family matches socket family.
+				if addrDisc != family {
 					mem.WriteByte(retPtr, 1)
 					mem.WriteByte(retPtr+4, errInvalidArgument)
 					stack[0] = 2
 					return
 				}
+				if addrDisc == 0 {
+					// IPv4
+					port, _ := mem.ReadUint16Le(paramsPtr + 20)
+					a, _ := mem.ReadByte(paramsPtr + 22)
+					b, _ := mem.ReadByte(paramsPtr + 23)
+					c, _ := mem.ReadByte(paramsPtr + 24)
+					d, _ := mem.ReadByte(paramsPtr + 25)
+					ip := net.IPv4(a, b, c, d)
+					// Check for INADDR_ANY (0.0.0.0).
+					if ip.Equal(net.IPv4zero) {
+						mem.WriteByte(retPtr, 1)
+						mem.WriteByte(retPtr+4, errInvalidArgument)
+						stack[0] = 2
+						return
+					}
+					if port == 0 {
+						mem.WriteByte(retPtr, 1)
+						mem.WriteByte(retPtr+4, errAddressNotBindable)
+						stack[0] = 2
+						return
+					}
+					targetAddr = &net.UDPAddr{IP: ip, Port: int(port)}
+				} else {
+					// IPv6
+					port, _ := mem.ReadUint16Le(paramsPtr + 20)
+					// Read 8 u16 segments for the IPv6 address.
+					var segments [8]uint16
+					for i := 0; i < 8; i++ {
+						segments[i], _ = mem.ReadUint16Le(paramsPtr + 28 + uint32(i)*2)
+					}
+					ip := make(net.IP, 16)
+					for i := 0; i < 8; i++ {
+						ip[i*2] = byte(segments[i] >> 8)
+						ip[i*2+1] = byte(segments[i])
+					}
+					// Check for IN6ADDR_ANY (::).
+					if ip.Equal(net.IPv6zero) {
+						mem.WriteByte(retPtr, 1)
+						mem.WriteByte(retPtr+4, errInvalidArgument)
+						stack[0] = 2
+						return
+					}
+					if port == 0 {
+						mem.WriteByte(retPtr, 1)
+						mem.WriteByte(retPtr+4, errAddressNotBindable)
+						stack[0] = 2
+						return
+					}
+					targetAddr = &net.UDPAddr{IP: ip, Port: int(port)}
+				}
+				// If connected, check that remote-address matches connected addr.
+				if remoteAddr != nil && !remoteAddr.IP.Equal(targetAddr.IP) {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errInvalidArgument)
+					stack[0] = 2
+					return
+				}
+				if remoteAddr != nil && remoteAddr.Port != targetAddr.Port {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errInvalidArgument)
+					stack[0] = 2
+					return
+				}
+			} else {
+				// None: socket must be connected.
+				if remoteAddr == nil {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errInvalidArgument)
+					stack[0] = 2
+					return
+				}
+				targetAddr = remoteAddr
+			}
 
-				data, _ := mem.Read(dataPtr, dataLen)
-				if len(data) > 0 {
+			// Check datagram size.
+			if dataLen >= 65536 {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, errDatagramTooLarge)
+				stack[0] = 2
+				return
+			}
+
+			// Auto-bind if not yet bound.
+			sock.mu.Lock()
+			if sock.addr == nil {
+				if family == 0 {
+					newConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+					if err != nil {
+						sock.mu.Unlock()
+						mem.WriteByte(retPtr, 1)
+						mem.WriteByte(retPtr+4, errAddressInUse)
+						stack[0] = 2
+						return
+					}
+					sock.conn = newConn
+					sock.addr = newConn.LocalAddr().(*net.UDPAddr)
+				} else {
+					// IPv6: simulated bind.
+					sock.addr = &net.UDPAddr{IP: net.IPv6loopback, Port: 0}
+				}
+			}
+			conn = sock.conn
+			sock.mu.Unlock()
+
+			// Send the data.
+			data, _ := mem.Read(dataPtr, dataLen)
+			if len(data) > 0 {
+				if conn != nil {
 					if remoteAddr != nil {
-						conn.WriteToUDP(data, remoteAddr)
-					} else {
 						conn.Write(data)
+					} else {
+						conn.WriteToUDP(data, targetAddr)
+					}
+				} else if targetAddr != nil {
+					// Simulated (IPv6) socket: deliver to mailbox.
+					// Must copy data since mem.Read returns a view into wasm memory.
+					dataCopy := make([]byte, len(data))
+					copy(dataCopy, data)
+					addrKey := fmt.Sprintf("udp[%s]:%d", targetAddr.IP, targetAddr.Port)
+					if mb, ok := udpMailboxes.Load(addrKey); ok {
+						sock.mu.Lock()
+						senderAddr := sock.addr
+						sock.mu.Unlock()
+						select {
+						case mb.(chan udpDatagram) <- udpDatagram{data: dataCopy, sender: senderAddr}:
+						default:
+						}
 					}
 				}
 			}
@@ -470,12 +627,21 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 		})
 
 	case "[method]udp-socket.receive":
-		// receive: func() -> result<list<datagram>, error-code>
+		// receive: async func() -> result<tuple<list<u8>, ip-socket-address>, error-code>
 		// Async-lower: (self: i32, retPtr: i32) -> i32
-		// Only param is self, so it fits directly on the stack.
-		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		// Result layout at retPtr:
+		//   +0:  result disc (u8) - 0=ok, 1=err
+		//   If ok:
+		//     +4:  list ptr (u32)
+		//     +8:  list len (u32)
+		//     +12: ip-socket-address disc (u8) - 0=IPv4, 1=IPv6
+		//     For IPv4: +16: port(u16), +18: a,b,c,d
+		//     For IPv6: +16: port(u16), +20: flow-info(u32), +24: addr(u16×8), +40: scope-id(u32)
+		//   If err:
+		//     +4:  error-code (u8)
+		return api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			self := uint32(stack[0])
-			retPtr := uint32(stack[len(paramTypes)-1])
+			retPtr := uint32(stack[1])
 			mem := mod.Memory()
 			if mem == nil {
 				return
@@ -491,36 +657,94 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 			sock := res.(*udpSocketResource)
 			sock.mu.Lock()
 			conn := sock.conn
+			addr := sock.addr
 			sock.mu.Unlock()
-
-			if conn == nil {
+			if conn == nil && addr == nil {
+				// Not bound.
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, errInvalidState)
 				stack[0] = 2
 				return
 			}
 
-			// Read up to one datagram.
-			buf := make([]byte, 65536)
-			conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			n, _, err := conn.ReadFromUDP(buf)
-			conn.SetReadDeadline(time.Time{})
-			if err != nil {
-				// Timeout = no data available.
-				mem.WriteByte(retPtr, 0) // ok - empty list
-				mem.WriteUint32Le(retPtr+4, 0)
-				mem.WriteUint32Le(retPtr+8, 0)
-				stack[0] = 2
+			if conn == nil {
+				// Simulated (IPv6) socket: read from mailbox.
+				addrKey := fmt.Sprintf("udp[%s]:%d", addr.IP, addr.Port)
+				mbVal, ok := udpMailboxes.Load(addrKey)
+				if !ok {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errInvalidState)
+					stack[0] = 2
+					return
+				}
+				mailbox := mbVal.(chan udpDatagram)
+
+				// Try non-blocking read.
+				select {
+				case dg := <-mailbox:
+					writeUDPReceiveResult(ctx, mod, retPtr, dg.data, dg.sender)
+					stack[0] = 2 // RETURNED
+					return
+				default:
+				}
+
+				// No data yet - create async subtask.
+				subtaskIdx := h.subtasks.NewPending(retPtr)
+				stack[0] = uint64(subtaskIdx<<4) | 1 // STARTED
+				go func() {
+					select {
+					case dg := <-mailbox:
+						h.subtasks.Complete(subtaskIdx, nil, func(ctx context.Context, mod api.Module) {
+							writeUDPReceiveResult(ctx, mod, retPtr, dg.data, dg.sender)
+						})
+					case <-time.After(30 * time.Second):
+						results := make([]byte, 8)
+						results[0] = 1
+						results[4] = errInvalidState
+						h.subtasks.Complete(subtaskIdx, results, nil)
+					}
+				}()
 				return
 			}
 
-			// Allocate memory for the datagram data.
-			// For simplicity, write result as ok with empty list for now.
-			_ = buf[:n]
-			mem.WriteByte(retPtr, 0) // ok
-			mem.WriteUint32Le(retPtr+4, 0)
-			mem.WriteUint32Le(retPtr+8, 0)
-			stack[0] = 2
+			// Try non-blocking read first.
+			buf := make([]byte, 65536)
+			conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+			n, senderAddr, err := conn.ReadFromUDP(buf)
+			conn.SetReadDeadline(time.Time{})
+
+			if err == nil {
+				// Data available - write result synchronously.
+				writeUDPReceiveResult(ctx, mod, retPtr, buf[:n], senderAddr)
+				stack[0] = 2 // RETURNED
+				return
+			}
+
+			// No data available - create async subtask.
+			subtaskIdx := h.subtasks.NewPending(retPtr)
+			stack[0] = uint64(subtaskIdx<<4) | 1 // STARTED
+
+			go func() {
+				readBuf := make([]byte, 65536)
+				conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				n, addr, err := conn.ReadFromUDP(readBuf)
+				conn.SetReadDeadline(time.Time{})
+
+				if err != nil {
+					// Error - return err result.
+					results := make([]byte, 8)
+					results[0] = 1 // err disc
+					results[4] = errInvalidState
+					h.subtasks.Complete(subtaskIdx, results, nil)
+				} else {
+					// Success - use resultsFn to allocate memory and write result.
+					data := make([]byte, n)
+					copy(data, readBuf[:n])
+					h.subtasks.Complete(subtaskIdx, nil, func(ctx context.Context, mod api.Module) {
+						writeUDPReceiveResult(ctx, mod, retPtr, data, addr)
+					})
+				}
+			}()
 		})
 	}
 	return nil
@@ -1023,6 +1247,9 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 						return
 					}
 					sock.addr = &net.UDPAddr{IP: ip, Port: int(port)}
+					// Register a mailbox for receiving simulated datagrams.
+					mailbox := make(chan udpDatagram, 64)
+					udpMailboxes.Store(addrKey, mailbox)
 					mem.WriteByte(retPtr, 0)
 					return
 				}

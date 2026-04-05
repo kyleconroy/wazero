@@ -1585,10 +1585,13 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 }
 
 // streamFuturePlumbing handles [stream-*] and [future-*] function imports.
-func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
+func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
 	if strings.HasPrefix(funcName, "[stream-new-0]") {
 		// () -> i64: return a new stream pair (readable | writable << 32)
-		// Use a bytes.Buffer so data written to the writable end can be read from the readable end.
+		// Always create a generic in-process stream. The actual I/O connection
+		// (stdin reader, stdout/stderr writer) is set up by the higher-level
+		// functions (read-via-stream, write-via-stream) when they receive
+		// the stream handle.
 		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			buf := new(bytes.Buffer)
 			shared := &streamResource{reader: buf, writer: buf}
@@ -1599,11 +1602,22 @@ func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, result
 	}
 
 	if strings.HasPrefix(funcName, "[future-new-1]") {
+		suffix := funcName[len("[future-new-1]"):]
 		// () -> i64: return a new future pair (readable | writable << 32)
 		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			shared := &futureResource{}
+			var shared *futureResource
+			if suffix == "read-via-stream" || suffix == "write-via-stream" {
+				// For CLI stdin/stdout/stderr: pre-ready with Ok result.
+				shared = &futureResource{
+					result: make([]byte, 20), // result<_, error-code>: disc=0 (Ok)
+					ready:  true,
+				}
+			} else {
+				shared = &futureResource{}
+			}
 			readHandle := h.resources.New(shared)
 			writeHandle := h.resources.New(shared)
+
 			stack[0] = uint64(readHandle) | (uint64(writeHandle) << 32)
 		})
 	}
@@ -1632,6 +1646,7 @@ func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, result
 
 			res, ok := h.resources.Get(handle)
 			if !ok {
+
 				stack[0] = 0x1 // DROPPED(0)
 				return
 			}
@@ -1887,6 +1902,10 @@ func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, result
 	// Handle [future-read-1]: guest reads a future value.
 	// Signature: (future_handle: i32, ret_ptr: i32) -> i32
 	if strings.HasPrefix(funcName, "[future-read-1]") || strings.HasPrefix(funcName, "[future-read-2]") {
+		suffix := funcName[len("[future-read-"):]
+		if idx := strings.Index(suffix, "]"); idx >= 0 {
+			suffix = suffix[idx+1:]
+		}
 		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			handle := uint32(stack[0])
 			retPtr := uint32(stack[1])
@@ -1894,6 +1913,16 @@ func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, result
 
 			res, ok := h.resources.Get(handle)
 			if !ok {
+				// For CLI stream functions (read-via-stream, write-via-stream),
+				// the guest may not call [future-new-1] and manages future handles
+				// internally. The future just means "operation completed OK".
+				if suffix == "read-via-stream" || suffix == "write-via-stream" {
+					// Write result<_, error-code> Ok discriminant at retPtr
+					okResult := make([]byte, 20)
+					mem.Write(retPtr, okResult)
+					stack[0] = 0 // COMPLETED(0)
+					return
+				}
 				stack[0] = 0x1 // DROPPED(0)
 				return
 			}
