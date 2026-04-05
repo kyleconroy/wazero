@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,6 +98,20 @@ type ComponentHost struct {
 
 	// subtasks tracks pending async subtasks for the component model protocol.
 	subtasks subtaskTable
+
+	// asyncEvents receives events from background goroutines (accept, etc.)
+	// for delivery through pollEvent in the callback loop.
+	asyncEvents chan asyncEvent
+
+	// pendingOps tracks the number of pending background operations.
+	pendingOps atomic.Int32
+}
+
+// asyncEvent represents a waitable-set-poll event.
+type asyncEvent struct {
+	eventType uint32 // STREAM_READ=2, STREAM_WRITE=3, FUTURE_READ=4, etc.
+	p1        uint32 // waitable index / stream handle
+	p2        uint32 // result code (e.g., COMPLETED(1))
 }
 
 // subtask represents a pending async-lower subtask.
@@ -153,8 +168,10 @@ type preopen struct {
 // point to the same shared resource so that data written to one end
 // can be read from the other.
 type streamResource struct {
-	reader io.Reader
-	writer io.Writer
+	reader      io.Reader
+	writer      io.Writer
+	pendingData []byte // cached data from background read
+	pendingEOF  bool   // background read hit EOF
 }
 
 // futureResource represents a future (single-value async result) resource.
@@ -181,13 +198,14 @@ func NewComponentHost(stdin io.Reader, stdout, stderr io.Writer, args []string, 
 		stderr = os.Stderr
 	}
 	return &ComponentHost{
-		resources:  newResourceTable(),
-		stdin:      stdin,
-		stdout:     stdout,
-		stderr:     stderr,
-		args:       args,
-		env:        env,
-		randSource: rand.Reader,
+		resources:   newResourceTable(),
+		stdin:       stdin,
+		stdout:      stdout,
+		stderr:      stderr,
+		args:        args,
+		env:         env,
+		randSource:  rand.Reader,
+		asyncEvents: make(chan asyncEvent, 64),
 	}
 }
 
@@ -386,14 +404,24 @@ func (h *ComponentHost) genericImportHandler(moduleName, funcName string, paramT
 // pollEvent returns the next event for the callback loop.
 // It writes subtask results to guest memory before delivering the event.
 func (h *ComponentHost) pollEvent(mod api.Module) (uint32, uint32, uint32) {
+	// Check for subtask events first.
 	idx, st := h.subtasks.PopReady()
 	if st != nil {
-		// Write the results to the guest's retPtr.
 		if mem := mod.Memory(); mem != nil && st.results != nil {
 			mem.Write(st.retPtr, st.results)
 		}
 		return 1, idx, 2 // SUBTASK event, subtask index, RETURNED state
 	}
+
+	// Non-blocking check for async events from background goroutines.
+	select {
+	case evt := <-h.asyncEvents:
+		return evt.eventType, evt.p1, evt.p2
+	default:
+		// Yield to let background goroutines make progress.
+		runtime.Gosched()
+	}
+
 	return 0, 0, 0 // NONE
 }
 
@@ -874,7 +902,7 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 	cl.DefineFunc("$root", "[waitable-join]",
 		[]api.ValueType{i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			// No-op.
+			// No-op: waitable registration is handled internally by the wasm runtime.
 		}))
 
 	cl.DefineFunc("$root", "[waitable-set-new]",
@@ -886,9 +914,8 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 	cl.DefineFunc("$root", "[waitable-set-poll]",
 		[]api.ValueType{i32, i32}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
-			// Always return 0 (no events). Events are delivered through the callback
-			// event source (pollEvent) to avoid consuming events before the callback
-			// loop can deliver them.
+			// Non-blocking poll: return 0 events.
+			// Events are delivered through the callback loop (pollEvent).
 			stack[0] = 0
 		}))
 

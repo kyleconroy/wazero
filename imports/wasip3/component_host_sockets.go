@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -14,8 +15,8 @@ import (
 // boundAddresses tracks addresses used by simulated (e.g. IPv6) sockets.
 var boundAddresses sync.Map // string -> bool
 
-// activeListeners tracks simulated IPv6 listener addresses (for connect simulation).
-var activeListeners sync.Map // string -> bool
+// activeListeners tracks simulated IPv6 listener addresses and their accept channels.
+var activeListeners sync.Map // string -> chan net.Conn
 
 // tcpSocketResource represents a TCP socket.
 type tcpSocketResource struct {
@@ -23,9 +24,12 @@ type tcpSocketResource struct {
 	family    uint8 // 0=IPv4, 1=IPv6
 	listener  *net.TCPListener
 	conn      *net.TCPConn
+	pipeConn  net.Conn // for simulated IPv6 connections (net.Pipe)
 	addr      *net.TCPAddr // bound address
 	connected bool         // true if connect succeeded (even simulated)
 	listening bool         // true if listen was called
+	receiving bool         // true if receive() was called (can only call once)
+	sending   bool         // true if send() was called (can only call once)
 }
 
 // udpSocketResource represents a UDP socket.
@@ -44,8 +48,10 @@ type tcpConnectionResource struct {
 
 // tcpListenerStream wraps a TCP listener as a stream resource for accepting connections.
 type tcpListenerStream struct {
-	listener *net.TCPListener
-	host     *ComponentHost
+	listener    *net.TCPListener
+	acceptCh    chan net.Conn // for simulated (IPv6) listeners
+	pendingConn net.Conn     // cached connection from background accept
+	host        *ComponentHost
 }
 
 // writeIPPort writes an IP address + port to memory using the component model's
@@ -229,15 +235,23 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 			if localAddr == nil {
 				localAddr = &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0}
 			}
-
 			conn, err := net.DialTCP("tcp", localAddr, remoteAddr)
 			if err != nil {
 				// If IPv6 not available, check if there's a simulated listener.
 				if addrDisc == 1 {
 					addrKey := fmt.Sprintf("[%s]:%d", ip, port)
-					if _, ok := activeListeners.Load(addrKey); ok {
+					if ch, ok := activeListeners.Load(addrKey); ok {
+						acceptCh := ch.(chan net.Conn)
+						// Create an in-memory pipe for the simulated connection.
+						clientConn, serverConn := net.Pipe()
+						sock.pipeConn = clientConn
 						sock.addr = localAddr
 						sock.connected = true
+						// Send the server end to the listener's accept channel.
+						select {
+						case acceptCh <- serverConn:
+						default:
+						}
 						mem.WriteByte(retPtr, 0) // ok
 						stack[0] = 2
 						return
@@ -254,6 +268,259 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 
 			mem.WriteByte(retPtr, 0) // ok
 			stack[0] = 2             // RETURNED
+		})
+
+	case "[method]tcp-socket.send":
+		// send: func(data: stream<u8>) -> future<result<_, error-code>>
+		// Async-lower: (params_ptr: i32, retPtr: i32) -> i32
+		// params in memory: self(i32), data_stream(i32)
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			paramsPtr := uint32(stack[0])
+			retPtr := uint32(stack[1])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			self, _ := mem.ReadUint32Le(paramsPtr)
+			dataStreamHandle, _ := mem.ReadUint32Le(paramsPtr + 4)
+
+			res, ok := h.resources.Get(self)
+			if !ok {
+				stack[0] = 2
+				return
+			}
+			sock := res.(*tcpSocketResource)
+			sock.mu.Lock()
+			conn := sock.conn
+			pipeConn := sock.pipeConn
+			connected := sock.connected
+			alreadySending := sock.sending
+			sock.sending = true
+			sock.mu.Unlock()
+
+			if !connected || alreadySending {
+				// Write Err(invalid-state) to retPtr.
+				mem.WriteByte(retPtr, 1)   // err discriminant
+				mem.WriteByte(retPtr+4, errInvalidState)
+				stack[0] = 2 // RETURNED
+				return
+			}
+
+			// Redirect the data stream's writer to the TCP connection.
+			if sr, ok := h.resources.Get(dataStreamHandle); ok {
+				if stream, ok := sr.(*streamResource); ok {
+					if conn != nil {
+						stream.writer = conn
+					} else if pipeConn != nil {
+						stream.writer = pipeConn
+					}
+				}
+			}
+
+			// Write Ok result to retPtr.
+			mem.WriteByte(retPtr, 0)
+			stack[0] = 2 // RETURNED
+		})
+
+	case "[method]tcp-socket.receive":
+		// receive: func() -> tuple<stream<u8>, future<result<_, error-code>>>
+		// Async-lower: (params_ptr: i32, retPtr: i32) -> i32
+		// params in memory: self(i32)
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			paramsPtr := uint32(stack[0])
+			retPtr := uint32(stack[1])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			self, _ := mem.ReadUint32Le(paramsPtr)
+
+			res, ok := h.resources.Get(self)
+			if !ok {
+				stack[0] = 2
+				return
+			}
+			sock := res.(*tcpSocketResource)
+			sock.mu.Lock()
+			conn := sock.conn
+			pipeConn := sock.pipeConn
+			connected := sock.connected
+			alreadyReceiving := sock.receiving
+			sock.receiving = true
+			sock.mu.Unlock()
+
+			if !connected || alreadyReceiving {
+				// Return stream + future with Err(invalid-state).
+				streamHandle := h.resources.New(&streamResource{})
+				futureResult := make([]byte, 20)
+				futureResult[0] = 1 // err discriminant
+				futureResult[4] = errInvalidState
+				futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
+				mem.WriteUint32Le(retPtr, streamHandle)
+				mem.WriteUint32Le(retPtr+4, futureHandle)
+				stack[0] = 2 // RETURNED
+				return
+			}
+
+			var reader io.Reader
+			if conn != nil {
+				reader = conn
+			} else if pipeConn != nil {
+				reader = pipeConn
+			}
+
+			streamHandle := h.resources.New(&streamResource{reader: reader})
+			futureResult := make([]byte, 20)
+			futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
+			mem.WriteUint32Le(retPtr, streamHandle)
+			mem.WriteUint32Le(retPtr+4, futureHandle)
+			stack[0] = 2 // RETURNED
+		})
+
+	case "[method]udp-socket.send":
+		// send: func(data: list<datagram>) -> result<_, error-code>
+		// Async-lower: params depend on how many fit flat.
+		// If len(paramTypes) == 2: spilled (params_ptr, retPtr)
+		// If len(paramTypes) > 2: direct (self, list_ptr, list_len, retPtr)
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			retPtr := uint32(stack[len(paramTypes)-1])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			var self uint32
+			var paramsPtr uint32
+			if len(paramTypes) == 2 {
+				// Spilled: params in memory.
+				paramsPtr = uint32(stack[0])
+				self, _ = mem.ReadUint32Le(paramsPtr)
+			} else {
+				// Direct params on stack.
+				self = uint32(stack[0])
+			}
+			// list<datagram>: ptr at paramsPtr+4, len at paramsPtr+8
+			// Each datagram has: data(ptr, len) + remote-address(optional variant)
+
+			res, ok := h.resources.Get(self)
+			if !ok {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, errInvalidArgument)
+				stack[0] = 2
+				return
+			}
+			sock := res.(*udpSocketResource)
+			sock.mu.Lock()
+			conn := sock.conn
+			remoteAddr := sock.remoteAddr
+			sock.mu.Unlock()
+
+			if conn == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, errInvalidState)
+				stack[0] = 2
+				return
+			}
+
+			// Read the datagram list.
+			var listPtr, listLen uint32
+			if len(paramTypes) == 2 {
+				listPtr, _ = mem.ReadUint32Le(paramsPtr + 4)
+				listLen, _ = mem.ReadUint32Le(paramsPtr + 8)
+			} else {
+				listPtr = uint32(stack[1])
+				listLen = uint32(stack[2])
+			}
+
+			// Each datagram struct in memory:
+			// data_ptr(4) + data_len(4) + remote_address(ip-socket-address variant)
+			// ip-socket-address: disc(1 byte, padded to 4) + payload
+			// ipv4 payload: port(u16) + pad(2) + addr(4) = 8 bytes
+			// ipv6 payload: port(u16) + pad(2) + flow-info(u32) + addr(16) + scope-id(u32) = 28 bytes
+			const datagramSize = 36 // data_ptr(4) + data_len(4) + addr_disc(4) + ipv6_payload(24 padded)
+			for i := uint32(0); i < listLen; i++ {
+				entryBase := listPtr + i*datagramSize
+				dataPtr, _ := mem.ReadUint32Le(entryBase)
+				dataLen, _ := mem.ReadUint32Le(entryBase + 4)
+
+				// Check remote address family (disc byte at offset 8).
+				addrDisc, _ := mem.ReadByte(entryBase + 8)
+				expectedDisc := byte(sock.family)
+				if addrDisc != expectedDisc {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errInvalidArgument)
+					stack[0] = 2
+					return
+				}
+
+				data, _ := mem.Read(dataPtr, dataLen)
+				if len(data) > 0 {
+					if remoteAddr != nil {
+						conn.WriteToUDP(data, remoteAddr)
+					} else {
+						conn.Write(data)
+					}
+				}
+			}
+
+			mem.WriteByte(retPtr, 0) // ok
+			stack[0] = 2             // RETURNED
+		})
+
+	case "[method]udp-socket.receive":
+		// receive: func() -> result<list<datagram>, error-code>
+		// Async-lower: (self: i32, retPtr: i32) -> i32
+		// Only param is self, so it fits directly on the stack.
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			self := uint32(stack[0])
+			retPtr := uint32(stack[len(paramTypes)-1])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			res, ok := h.resources.Get(self)
+			if !ok {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, errInvalidArgument)
+				stack[0] = 2
+				return
+			}
+			sock := res.(*udpSocketResource)
+			sock.mu.Lock()
+			conn := sock.conn
+			sock.mu.Unlock()
+
+			if conn == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, errInvalidState)
+				stack[0] = 2
+				return
+			}
+
+			// Read up to one datagram.
+			buf := make([]byte, 65536)
+			conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, _, err := conn.ReadFromUDP(buf)
+			conn.SetReadDeadline(time.Time{})
+			if err != nil {
+				// Timeout = no data available.
+				mem.WriteByte(retPtr, 0) // ok - empty list
+				mem.WriteUint32Le(retPtr+4, 0)
+				mem.WriteUint32Le(retPtr+8, 0)
+				stack[0] = 2
+				return
+			}
+
+			// Allocate memory for the datagram data.
+			// For simplicity, write result as ok with empty list for now.
+			_ = buf[:n]
+			mem.WriteByte(retPtr, 0) // ok
+			mem.WriteUint32Le(retPtr+4, 0)
+			mem.WriteUint32Le(retPtr+8, 0)
+			stack[0] = 2
 		})
 	}
 	return nil
@@ -291,11 +558,18 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 					if sock.conn != nil {
 						sock.conn.Close()
 					}
-					// Clean up simulated IPv6 listener tracking.
-					if sock.addr != nil && sock.family == 1 {
-						addrKey := fmt.Sprintf("[%s]:%d", sock.addr.IP, sock.addr.Port)
-						activeListeners.Delete(addrKey)
+					// Clean up listener and address tracking.
+					if sock.addr != nil {
+						addrKey := fmt.Sprintf("%s:%d", sock.addr.IP, sock.addr.Port)
 						boundAddresses.Delete(addrKey)
+						if sock.family == 1 {
+							addrKey = fmt.Sprintf("[%s]:%d", sock.addr.IP, sock.addr.Port)
+							activeListeners.Delete(addrKey)
+							boundAddresses.Delete(addrKey)
+						}
+					}
+					if sock.pipeConn != nil {
+						sock.pipeConn.Close()
 					}
 					sock.mu.Unlock()
 				}
@@ -390,6 +664,17 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 			if addrDisc != 0 {
 				network = "tcp6"
 			}
+
+			// Check if address is already bound in our tracking map.
+			if port != 0 {
+				addrKey := fmt.Sprintf("%s:%d", ip, port)
+				if _, loaded := boundAddresses.Load(addrKey); loaded {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errAddressInUse)
+					return
+				}
+			}
+
 			listener, err := net.ListenTCP(network, bindAddr)
 			if err != nil {
 				// If IPv6 not available on the host, simulate bind.
@@ -411,8 +696,13 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 				mem.WriteByte(retPtr+4, errAddressInUse)
 				return
 			}
-			sock.listener = listener
+			// Store the address but close the listener - it will be re-created
+			// by listen() if needed. This allows connect() to reuse the address.
 			sock.addr = listener.Addr().(*net.TCPAddr)
+			listener.Close()
+			// Track the bound address so duplicate binds are detected.
+			addrKey := fmt.Sprintf("%s:%d", sock.addr.IP, sock.addr.Port)
+			boundAddresses.Store(addrKey, true)
 			mem.WriteByte(retPtr, 0) // ok
 		})
 
@@ -434,6 +724,13 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 			sock.mu.Lock()
 			defer sock.mu.Unlock()
 
+			// Reject listen if already listening or connected.
+			if sock.listening || sock.connected {
+				mem.WriteByte(retPtr, 1) // err
+				mem.WriteByte(retPtr+4, errInvalidState)
+				return
+			}
+
 			// If not already bound (no listener from bind), bind now.
 			if sock.listener == nil {
 				addr := sock.addr
@@ -452,9 +749,10 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 							sock.addr = &net.TCPAddr{IP: net.ParseIP("::1"), Port: 12345}
 						}
 						addrKey := fmt.Sprintf("[%s]:%d", sock.addr.IP, sock.addr.Port)
-						activeListeners.Store(addrKey, true)
+						acceptCh := make(chan net.Conn, 16)
+						activeListeners.Store(addrKey, acceptCh)
 						sock.listening = true
-						streamHandle := h.resources.New(&tcpListenerStream{host: h})
+						streamHandle := h.resources.New(&tcpListenerStream{acceptCh: acceptCh, host: h})
 						mem.WriteByte(retPtr, 0) // ok
 						mem.WriteUint32Le(retPtr+4, streamHandle)
 						return
@@ -474,46 +772,55 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 		})
 
 	case "[method]tcp-socket.send":
-		// (self: i32, retPtr: i32) -> (i32)
-		// Returns tuple<stream<u8>, future<result<_, error-code>>> at retPtr.
-		// The i32 return is the stream handle (or status).
-		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		// send: func(data: stream<u8>) -> future<result<_, error-code>>
+		// Lowered: (self: i32, data_stream: i32) -> (future_handle: i32)
+		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			self := uint32(stack[0])
-			retPtr := uint32(stack[1])
-			mem := mod.Memory()
-			if mem == nil {
-				return
-			}
+			dataStreamHandle := uint32(stack[1])
 
 			res, ok := h.resources.Get(self)
 			if !ok {
-				if len(resultTypes) > 0 {
-					stack[0] = 0
-				}
+				stack[0] = 0
 				return
 			}
 			sock := res.(*tcpSocketResource)
 			sock.mu.Lock()
 			conn := sock.conn
+			pipeConn := sock.pipeConn
+			connected := sock.connected
+			alreadySending := sock.sending
+			sock.sending = true
 			sock.mu.Unlock()
-
-			var writer io.Writer
-			if conn != nil {
-				writer = conn
+			if !connected || alreadySending {
+				// Return future with Err(invalid-state).
+				futureResult := make([]byte, 20)
+				futureResult[0] = 1 // err discriminant
+				futureResult[4] = errInvalidState
+				futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
+				stack[0] = uint64(futureHandle)
+				return
 			}
 
-			streamHandle := h.resources.New(&streamResource{writer: writer})
-			futureResult := make([]byte, 20)
+			// Redirect the data stream's writer to the TCP connection.
+			if sr, ok := h.resources.Get(dataStreamHandle); ok {
+				if stream, ok := sr.(*streamResource); ok {
+					if conn != nil {
+						stream.writer = conn
+					} else if pipeConn != nil {
+						stream.writer = pipeConn
+					}
+				}
+			}
+
+			// Create a pre-ready future with Ok result.
+			futureResult := make([]byte, 20) // result<_, error-code> = Ok
 			futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
-			mem.WriteUint32Le(retPtr, streamHandle)
-			mem.WriteUint32Le(retPtr+4, futureHandle)
-			if len(resultTypes) > 0 {
-				stack[0] = uint64(streamHandle)
-			}
+			stack[0] = uint64(futureHandle)
 		})
 
 	case "[method]tcp-socket.receive":
-		// (self: i32, retPtr: i32) -> ()
+		// receive: func() -> tuple<stream<u8>, future<result<_, error-code>>>
+		// Lowered: (self: i32, retPtr: i32) -> ()
 		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			self := uint32(stack[0])
 			retPtr := uint32(stack[1])
@@ -529,11 +836,29 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 			sock := res.(*tcpSocketResource)
 			sock.mu.Lock()
 			conn := sock.conn
+			pipeConn := sock.pipeConn
+			connected := sock.connected
+			alreadyReceiving := sock.receiving
+			sock.receiving = true
 			sock.mu.Unlock()
+
+			if !connected || alreadyReceiving {
+				// Return stream + future with Err(invalid-state).
+				streamHandle := h.resources.New(&streamResource{})
+				futureResult := make([]byte, 20)
+				futureResult[0] = 1 // err discriminant
+				futureResult[4] = errInvalidState
+				futureHandle := h.resources.New(&futureResource{result: futureResult, ready: true})
+				mem.WriteUint32Le(retPtr, streamHandle)
+				mem.WriteUint32Le(retPtr+4, futureHandle)
+				return
+			}
 
 			var reader io.Reader
 			if conn != nil {
 				reader = conn
+			} else if pipeConn != nil {
+				reader = pipeConn
 			}
 
 			streamHandle := h.resources.New(&streamResource{reader: reader})

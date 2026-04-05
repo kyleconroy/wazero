@@ -256,7 +256,7 @@ func (cl *ComponentLinker) runAsyncEntry(ctx context.Context, mod api.Module, as
 	iter := 0
 	for code != callbackExit {
 		iter++
-		if iter > 100 {
+		if iter > 10000 {
 			break
 		}
 		if cl.preCallbackHook != nil {
