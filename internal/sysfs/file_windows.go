@@ -50,6 +50,10 @@ func writeFd(uintptr, []byte) (int, sys.Errno) {
 	return -1, sys.ENOSYS
 }
 
+func pwriteFd(uintptr, []byte, int64) (int, sys.Errno) {
+	return -1, sys.ENOSYS
+}
+
 func readSocket(h uintptr, buf []byte) (int, sys.Errno) {
 	// Poll the socket to ensure that we never perform a blocking/overlapped Read.
 	//

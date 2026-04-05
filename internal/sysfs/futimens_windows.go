@@ -10,6 +10,11 @@ func utimens(path string, atim, mtim int64) sys.Errno {
 	return chtimes(path, atim, mtim)
 }
 
+func lutimens(path string, atim, mtim int64) sys.Errno {
+	// Windows doesn't support modifying symlink timestamps without following.
+	return sys.ENOSYS
+}
+
 func futimens(fd uintptr, atim, mtim int64) error {
 	// Per docs, zero isn't a valid timestamp as it cannot be differentiated
 	// from nil. In both cases, it is a marker like sys.UTIME_OMIT.

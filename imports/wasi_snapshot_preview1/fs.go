@@ -87,6 +87,12 @@ func fdAllocateFn(_ context.Context, mod api.Module, params []uint64) experiment
 		return experimentalsys.EINVAL
 	}
 
+	if isDir, errno := f.File.IsDir(); errno != 0 {
+		return errno
+	} else if isDir {
+		return experimentalsys.EISDIR
+	}
+
 	st, errno := f.File.Stat()
 	if errno != 0 {
 		return errno
@@ -202,7 +208,12 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) experimen
 		return experimentalsys.EBADF
 	} else if st, errno = f.File.Stat(); errno != 0 {
 		return errno
-	} else if f.File.IsAppend() {
+	}
+
+	// Include stored WASI fdflags from path_open (FD_SYNC, FD_DSYNC, FD_RSYNC).
+	fdflags = f.FdFlags
+
+	if f.File.IsAppend() {
 		fdflags |= wasip1.FD_APPEND
 	}
 
@@ -216,17 +227,19 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) experimen
 
 	switch fileType {
 	case wasip1.FILETYPE_DIRECTORY:
-		// To satisfy wasi-testsuite, we must advertise that directories cannot
-		// be given seek permission (RIGHT_FD_SEEK).
 		fsRightsBase = dirRightsBase
 		fsRightsInheriting = fileRightsBase | dirRightsBase
 	case wasip1.FILETYPE_CHARACTER_DEVICE:
-		// According to wasi-libc,
-		// > A tty is a character device that we can't seek or tell on.
-		// See https://github.com/WebAssembly/wasi-libc/blob/a6f871343313220b76009827ed0153586361c0d5/libc-bottom-half/sources/isatty.c#L13-L18
 		fsRightsBase = fileRightsBase &^ wasip1.RIGHT_FD_SEEK &^ wasip1.RIGHT_FD_TELL
 	default:
 		fsRightsBase = fileRightsBase
+	}
+
+	// If rights were explicitly set (via path_open or fd_fdstat_set_rights),
+	// intersect with the file type's natural rights to restrict them.
+	if f.RightsBase != 0 || f.RightsInheriting != 0 {
+		fsRightsBase &= f.RightsBase
+		fsRightsInheriting &= f.RightsInheriting
 	}
 
 	writeFdstat(buf, fileType, fdflags, fsRightsBase, fsRightsInheriting)
@@ -330,14 +343,60 @@ func fdFdstatSetFlagsFn(_ context.Context, mod api.Module, params []uint64) expe
 	return 0
 }
 
-// fdFdstatSetRights will not be implemented as rights were removed from WASI.
+// fdFdstatSetRights is a no-op as rights were removed from WASI.
 //
 // See https://github.com/bytecodealliance/wasmtime/pull/4666
-var fdFdstatSetRights = stubFunction(
-	wasip1.FdFdstatSetRightsName,
+var fdFdstatSetRights = newHostFunc(
+	wasip1.FdFdstatSetRightsName, fdFdstatSetRightsFn,
 	[]wasm.ValueType{i32, i64, i64},
 	"fd", "fs_rights_base", "fs_rights_inheriting",
 )
+
+func fdFdstatSetRightsFn(_ context.Context, mod api.Module, params []uint64) experimentalsys.Errno {
+	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
+	fd := int32(params[0])
+	rightsBase := uint32(params[1])
+	rightsInheriting := uint32(params[2])
+	f, ok := fsc.LookupFile(fd)
+	if !ok {
+		return experimentalsys.EBADF
+	}
+
+	// Determine the current effective rights.
+	var currentBase, currentInheriting uint32
+	if f.RightsBase != 0 || f.RightsInheriting != 0 {
+		currentBase = f.RightsBase
+		currentInheriting = f.RightsInheriting
+	} else {
+		// Compute default rights based on file type.
+		st, errno := f.File.Stat()
+		if errno != 0 {
+			return errno
+		}
+		fileType := getWasiFiletype(st.Mode)
+		switch fileType {
+		case wasip1.FILETYPE_DIRECTORY:
+			currentBase = dirRightsBase
+			currentInheriting = fileRightsBase | dirRightsBase
+		case wasip1.FILETYPE_CHARACTER_DEVICE:
+			currentBase = fileRightsBase &^ wasip1.RIGHT_FD_SEEK &^ wasip1.RIGHT_FD_TELL
+		default:
+			currentBase = fileRightsBase
+		}
+	}
+
+	// Rights can only be reduced, never expanded.
+	if rightsBase & ^currentBase != 0 {
+		return experimentalsys.ENOTCAPABLE
+	}
+	if rightsInheriting & ^currentInheriting != 0 {
+		return experimentalsys.ENOTCAPABLE
+	}
+
+	f.RightsBase = rightsBase
+	f.RightsInheriting = rightsInheriting
+	return 0
+}
 
 // fdFilestatGet is the WASI function named FdFilestatGetName which returns
 // the stat attributes of an open file.
@@ -476,6 +535,8 @@ func fdFilestatSetSizeFn(_ context.Context, mod api.Module, params []uint64) exp
 	// Check to see if the file descriptor is available
 	if f, ok := fsc.LookupFile(fd); !ok {
 		return experimentalsys.EBADF
+	} else if isDir, _ := f.File.IsDir(); isDir {
+		return experimentalsys.EISDIR
 	} else {
 		return f.File.Truncate(size)
 	}
@@ -669,11 +730,11 @@ func fdPrestatDirNameFn(_ context.Context, mod api.Module, params []uint64) expe
 	}
 
 	// Some runtimes may have another semantics. See /RATIONALE.md
-	if uint32(len(name)) < pathLen {
+	if uint32(len(name)) > pathLen {
 		return experimentalsys.ENAMETOOLONG
 	}
 
-	if !mod.Memory().Write(path, []byte(name)[:pathLen]) {
+	if !mod.Memory().Write(path, []byte(name)) {
 		return experimentalsys.EFAULT
 	}
 	return 0
@@ -783,6 +844,10 @@ func fdReadOrPread(mod api.Module, params []uint64, isPread bool) experimentalsy
 	var reader func(buf []byte) (n int, errno experimentalsys.Errno)
 	if f, ok := fsc.LookupFile(fd); !ok {
 		return experimentalsys.EBADF
+	} else if f.RightsBase != 0 && f.RightsBase&wasip1.RIGHT_FD_READ == 0 {
+		return experimentalsys.ENOTCAPABLE
+	} else if isDir, _ := f.File.IsDir(); isDir {
+		return experimentalsys.EISDIR
 	} else if isPread {
 		offset := int64(params[3])
 		reader = (&preader{f: f.File, offset: offset}).Read
@@ -1267,6 +1332,10 @@ func fdWriteOrPwrite(mod api.Module, params []uint64, isPwrite bool) experimenta
 	var writer func(buf []byte) (n int, errno experimentalsys.Errno)
 	if f, ok := fsc.LookupFile(fd); !ok {
 		return experimentalsys.EBADF
+	} else if f.RightsBase != 0 && f.RightsBase&wasip1.RIGHT_FD_WRITE == 0 {
+		return experimentalsys.ENOTCAPABLE
+	} else if isDir, _ := f.File.IsDir(); isDir {
+		return experimentalsys.EISDIR
 	} else if isPwrite {
 		offset := int64(params[3])
 		writer = (&pwriter{f: f.File, offset: offset}).Write
@@ -1466,7 +1535,14 @@ func pathFilestatSetTimesFn(_ context.Context, mod api.Module, params []uint64) 
 	if symlinkFollow {
 		return preopen.Utimens(pathName, atim, mtim)
 	}
-	// Otherwise, we need to emulate don't follow by opening the file by path.
+	// Use Lutimens (no-follow) if the FS supports it.
+	type lutimensFS interface {
+		Lutimens(path string, atim, mtim int64) experimentalsys.Errno
+	}
+	if lfs, ok := preopen.(lutimensFS); ok {
+		return lfs.Lutimens(pathName, atim, mtim)
+	}
+	// Fall back to opening the file (which follows symlinks).
 	if f, errno := preopen.OpenFile(pathName, experimentalsys.O_WRONLY, 0); errno != 0 {
 		return errno
 	} else {
@@ -1490,10 +1566,14 @@ func pathLinkFn(_ context.Context, mod api.Module, params []uint64) experimental
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 
 	oldFD := int32(params[0])
-	// TODO: use old_flags?
-	_ = uint32(params[1])
+	oldFlags := uint16(params[1])
 	oldPath := uint32(params[2])
 	oldPathLen := uint32(params[3])
+
+	// WASI doesn't support SYMLINK_FOLLOW for path_link.
+	if oldFlags&wasip1.LOOKUP_SYMLINK_FOLLOW != 0 {
+		return experimentalsys.EINVAL
+	}
 
 	oldFS, oldName, errno := atPath(fsc, mem, oldFD, oldPath, oldPathLen)
 	if errno != 0 {
@@ -1590,8 +1670,7 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) experimental
 	oflags := uint16(params[4])
 
 	rights := uint32(params[5])
-	// inherited rights aren't used
-	_ = params[6]
+	rightsInheriting := uint32(params[6])
 
 	fdflags := uint16(params[7])
 	resultOpenedFD := uint32(params[8])
@@ -1605,6 +1684,13 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) experimental
 		return experimentalsys.EINVAL
 	}
 
+	// Enforce reduced rights on the parent directory.
+	if preopenFile, ok := fsc.LookupFile(preopenFD); ok && preopenFile.RightsBase != 0 {
+		if oflags&wasip1.O_TRUNC != 0 && preopenFile.RightsBase&wasip1.RIGHT_PATH_FILESTAT_SET_SIZE == 0 {
+			return experimentalsys.EPERM
+		}
+	}
+
 	fileOpenFlags := openFlags(dirflags, oflags, fdflags, rights)
 	isDir := fileOpenFlags&experimentalsys.O_DIRECTORY != 0
 
@@ -1615,6 +1701,13 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) experimental
 	newFD, errno := fsc.OpenFile(preopen, pathName, fileOpenFlags, 0o600)
 	if errno != 0 {
 		return errno
+	}
+
+	// Store WASI fdflags and rights on the file entry so fd_fdstat_get can report them.
+	if f, ok := fsc.LookupFile(newFD); ok {
+		f.FdFlags = fdflags
+		f.RightsBase = rights
+		f.RightsInheriting = rightsInheriting
 	}
 
 	// Check any flags that require the file to evaluate.
@@ -1804,15 +1897,18 @@ func pathReadlinkFn(_ context.Context, mod api.Module, params []uint64) experime
 		return errno
 	}
 
-	if len(dst) > int(bufLen) {
-		return experimentalsys.ERANGE
+	// Truncate to the buffer size if the link target is longer.
+	used := uint32(len(dst))
+	if used > bufLen {
+		dst = dst[:bufLen]
+		used = bufLen
 	}
 
 	if ok := mem.WriteString(buf, dst); !ok {
 		return experimentalsys.EFAULT
 	}
 
-	if !mem.WriteUint32Le(resultBufused, uint32(len(dst))) {
+	if !mem.WriteUint32Le(resultBufused, used) {
 		return experimentalsys.EFAULT
 	}
 	return 0

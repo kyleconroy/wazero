@@ -165,7 +165,7 @@ jobs:
         run: |
           python3 -m pip install -r requirements.txt
 
-      - name: Run all wasi-testsuite
+      - name: Run all wasi-testsuite (Preview 1)
         working-directory: wasi-testsuite
         run: |
           python3 test-runner/wasi_test_runner.py \
@@ -174,6 +174,19 @@ jobs:
             ./tests/rust/testsuite/ \
             -f ../.github/wasi_testsuite_skip.json \
             -r ../.github/wasi_testsuite_adapter.py
+
+      - name: Run wasi-testsuite (Preview 2)
+        working-directory: wasi-testsuite
+        continue-on-error: true # p2 tests are still being stabilized
+        run: |
+          if [ -d "./tests/preview2" ]; then
+            python3 test-runner/wasi_test_runner.py \
+              -t ./tests/preview2/testsuite/ \
+              -f ../.github/wasi_testsuite_skip_p2.json \
+              -r ../.github/wasi_testsuite_adapter_p2.py
+          else
+            echo "No WASI Preview 2 tests found in testsuite, skipping."
+          fi
 
   go_tests:
     # Due to the embedding of the GOROOT of the building env (https://github.com/golang/go/blob/go1.24.0/src/os/os_test.go#L115),

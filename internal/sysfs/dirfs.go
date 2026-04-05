@@ -122,6 +122,11 @@ func (d *dirFS) Utimens(path string, atim, mtim int64) experimentalsys.Errno {
 	return utimens(d.join(path), atim, mtim)
 }
 
+// Lutimens is like Utimens but does not follow symlinks.
+func (d *dirFS) Lutimens(path string, atim, mtim int64) experimentalsys.Errno {
+	return lutimens(d.join(path), atim, mtim)
+}
+
 func (d *dirFS) join(path string) string {
 	switch path {
 	case "", ".", "/":

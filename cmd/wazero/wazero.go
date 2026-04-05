@@ -22,6 +22,7 @@ import (
 	"github.com/tetratelabs/wazero/experimental/sock"
 	"github.com/tetratelabs/wazero/experimental/sysfs"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/tetratelabs/wazero/imports/wasip3"
 	internalsys "github.com/tetratelabs/wazero/internal/sys"
 	"github.com/tetratelabs/wazero/internal/version"
 	"github.com/tetratelabs/wazero/sys"
@@ -339,28 +340,34 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 		conf = conf.WithEnv(env[i], env[i+1])
 	}
 
-	guest, err := rt.CompileModule(compilationCtx, wasm)
-	if err != nil {
-		fmt.Fprintf(stdErr, "error compiling wasm binary: %v\n", err)
-		return 1
-	}
+	if wazero.IsComponent(wasm) {
+		// Component model binary: use the component instantiation path.
+		host := wasip3.NewComponentHost(os.Stdin, stdOut, stdErr, append([]string{wasmExe}, wasmArgs...), parseEnvPairs(env))
+		_, err = wasip3.InstantiateComponentWithHost(ctx, rt, wasm, conf, host)
+	} else {
+		guest, compileErr := rt.CompileModule(compilationCtx, wasm)
+		if compileErr != nil {
+			fmt.Fprintf(stdErr, "error compiling wasm binary: %v\n", compileErr)
+			return 1
+		}
 
-	switch detectImports(guest.ImportedFunctions()) {
-	case modeWasi:
-		wasi_snapshot_preview1.MustInstantiate(ctx, rt)
-		_, err = rt.InstantiateModule(ctx, guest, conf)
-	case modeWasiUnstable:
-		// Instantiate the current WASI functions under the wasi_unstable
-		// instead of wasi_snapshot_preview1.
-		wasiBuilder := rt.NewHostModuleBuilder("wasi_unstable")
-		wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
-		_, err = wasiBuilder.Instantiate(ctx)
-		if err == nil {
-			// Instantiate our binary, but using the old import names.
+		switch detectImports(guest.ImportedFunctions()) {
+		case modeWasi:
+			wasi_snapshot_preview1.MustInstantiate(ctx, rt)
+			_, err = rt.InstantiateModule(ctx, guest, conf)
+		case modeWasiUnstable:
+			// Instantiate the current WASI functions under the wasi_unstable
+			// instead of wasi_snapshot_preview1.
+			wasiBuilder := rt.NewHostModuleBuilder("wasi_unstable")
+			wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
+			_, err = wasiBuilder.Instantiate(ctx)
+			if err == nil {
+				// Instantiate our binary, but using the old import names.
+				_, err = rt.InstantiateModule(ctx, guest, conf)
+			}
+		case modeDefault:
 			_, err = rt.InstantiateModule(ctx, guest, conf)
 		}
-	case modeDefault:
-		_, err = rt.InstantiateModule(ctx, guest, conf)
 	}
 
 	if err != nil {
@@ -471,6 +478,14 @@ func detectImports(imports []api.FunctionDefinition) importMode {
 		}
 	}
 	return modeDefault
+}
+
+func parseEnvPairs(env []string) [][2]string {
+	var pairs [][2]string
+	for i := 0; i+1 < len(env); i += 2 {
+		pairs = append(pairs, [2]string{env[i], env[i+1]})
+	}
+	return pairs
 }
 
 func maybeHostLogging(ctx context.Context, scopes logging.LogScopes, stdErr logging.Writer) context.Context {

@@ -79,24 +79,27 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 		return sys.EFAULT
 	}
 
-	// Loop through all subscriptions and write their output.
+	// Loop through all subscriptions and categorize them.
 
 	// Extract FS context, used in the body of the for loop for FS access.
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 	// Slice of events that are processed out of the loop (blocking stdin subscribers).
 	var blockingStdinSubs []*event
+	// Clock events are deferred and only written if no FD events are ready.
+	var clockEvents []*event
 	// The timeout is initialized at max Duration, the loop will find the minimum.
 	var timeout time.Duration = 1<<63 - 1
 	// Count of all the subscriptions that have been already written back to outBuf.
 	// nevents*32 returns at all times the offset where the next event should be written:
 	// this way we ensure that there are no gaps between records.
 	nevents := uint32(0)
+	// Count of immediately-ready FD events (not counting clock or deferred stdin).
+	fdEvents := uint32(0)
 
 	// Layout is subscription_u: Union
 	// https://github.com/WebAssembly/WASI/blob/snapshot-01/phases/snapshot/docs.md#subscription_u
 	for i := uint32(0); i < nsubscriptions; i++ {
 		inOffset := i * 48
-		outOffset := nevents * 32
 
 		eventType := inBuf[inOffset+8] // +8 past userdata
 		// +8 past userdata +8 contents_offset
@@ -110,7 +113,7 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 		}
 
 		switch eventType {
-		case wasip1.EventTypeClock: // handle later
+		case wasip1.EventTypeClock:
 			newTimeout, err := processClockEvent(argBuf)
 			if err != 0 {
 				return err
@@ -119,9 +122,8 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 			if newTimeout < timeout {
 				timeout = newTimeout
 			}
-			// Ack the clock event to the outBuf.
-			writeEvent(outBuf[outOffset:], evt)
-			nevents++
+			// Defer clock events; only include them if we need to wait.
+			clockEvents = append(clockEvents, evt)
 		case wasip1.EventTypeFdRead:
 			fd := int32(le.Uint32(argBuf))
 			if fd < 0 {
@@ -129,11 +131,13 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 			}
 			if file, ok := fsc.LookupFile(fd); !ok {
 				evt.errno = wasip1.ErrnoBadf
-				writeEvent(outBuf[outOffset:], evt)
+				writeEvent(outBuf[nevents*32:], evt)
 				nevents++
+				fdEvents++
 			} else if fd != internalsys.FdStdin && isNonblock(file.File) {
-				writeEvent(outBuf[outOffset:], evt)
+				writeEvent(outBuf[nevents*32:], evt)
 				nevents++
+				fdEvents++
 			} else {
 				// if the fd is Stdin, and it is in blocking mode,
 				// do not ack yet, append to a slice for delayed evaluation.
@@ -145,54 +149,66 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 				return sys.EBADF
 			}
 			if _, ok := fsc.LookupFile(fd); ok {
-				evt.errno = wasip1.ErrnoNotsup
+				evt.errno = wasip1.ErrnoSuccess
 			} else {
 				evt.errno = wasip1.ErrnoBadf
 			}
+			writeEvent(outBuf[nevents*32:], evt)
 			nevents++
-			writeEvent(outBuf[outOffset:], evt)
+			fdEvents++
 		default:
 			return sys.EINVAL
 		}
 	}
 
 	sysCtx := mod.(*wasm.ModuleInstance).Sys
-	if nevents == nsubscriptions {
-		// We already wrote back all the results. We already wrote this number
-		// earlier to offset `resultNevents`.
-		// We only need to observe the timeout (nonzero if there are clock subscriptions)
-		// and return.
-		if timeout > 0 {
-			sysCtx.Nanosleep(int64(timeout))
+
+	// If FD events are immediately ready, return them without waiting.
+	if fdEvents > 0 && len(blockingStdinSubs) == 0 {
+		if !mod.Memory().WriteUint32Le(resultNevents, nevents) {
+			return sys.EFAULT
 		}
 		return 0
 	}
 
-	// If there are blocking stdin subscribers, check for data with given timeout.
-	stdin, ok := fsc.LookupFile(internalsys.FdStdin)
-	if !ok {
-		return sys.EBADF
-	}
+	// No FD events are ready, or there are blocking stdin subscribers.
+	// We need to wait for the timeout.
+	if len(blockingStdinSubs) > 0 {
+		// If there are blocking stdin subscribers, check for data with given timeout.
+		stdin, ok := fsc.LookupFile(internalsys.FdStdin)
+		if !ok {
+			return sys.EBADF
+		}
 
-	// Wait for the timeout to expire, or for some data to become available on Stdin.
-	if p, ok := stdin.File.(sys.Pollable); ok {
-		if stdinReady, errno := p.Poll(sys.POLLIN, int32(timeout.Milliseconds())); errno != 0 {
-			return errno
-		} else if stdinReady {
-			// stdin has data ready to for reading, write back all the events
-			for i := range blockingStdinSubs {
-				evt := blockingStdinSubs[i]
-				evt.errno = 0
-				writeEvent(outBuf[nevents*32:], evt)
-				nevents++
+		// Wait for the timeout to expire, or for some data to become available on Stdin.
+		if p, ok := stdin.File.(sys.Pollable); ok {
+			if stdinReady, errno := p.Poll(sys.POLLIN, int32(timeout.Milliseconds())); errno != 0 {
+				return errno
+			} else if stdinReady {
+				// stdin has data ready for reading, write back all the events
+				for i := range blockingStdinSubs {
+					evt := blockingStdinSubs[i]
+					evt.errno = 0
+					writeEvent(outBuf[nevents*32:], evt)
+					nevents++
+				}
 			}
 		}
+	} else {
+		// Only clock subscriptions remain; sleep for the timeout.
+		if timeout > 0 {
+			sysCtx.Nanosleep(int64(timeout))
+		}
 	}
 
-	if nevents != nsubscriptions {
-		if !mod.Memory().WriteUint32Le(resultNevents, nevents) {
-			return sys.EFAULT
-		}
+	// Write clock events (the timeout has expired).
+	for _, evt := range clockEvents {
+		writeEvent(outBuf[nevents*32:], evt)
+		nevents++
+	}
+
+	if !mod.Memory().WriteUint32Le(resultNevents, nevents) {
+		return sys.EFAULT
 	}
 
 	return 0

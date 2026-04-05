@@ -41,10 +41,9 @@ const (
 	ENOTSUP
 	EPERM
 	EROFS
-
-	// NOTE ENOTCAPABLE is defined in wasip1, but not in POSIX. wasi-libc
-	// converts it to EBADF, ESPIPE or EINVAL depending on the call site.
-	// It isn't known if compilers who don't use ENOTCAPABLE would crash on it.
+	// ENOTCAPABLE is defined in WASI (not POSIX). It indicates insufficient
+	// capabilities/rights for the requested operation.
+	ENOTCAPABLE
 )
 
 // Error implements error
@@ -92,6 +91,8 @@ func (e Errno) Error() string {
 		return "operation not permitted"
 	case EROFS:
 		return "read-only file system"
+	case ENOTCAPABLE:
+		return "capabilities insufficient"
 	default:
 		return "Errno(" + strconv.Itoa(int(e)) + ")"
 	}
