@@ -26,6 +26,10 @@ type ComponentLinker struct {
 	// preCallbackHook is called before each async callback invocation.
 	// Used to restore context slots that the guest clears between callbacks.
 	preCallbackHook func()
+	// eventSource provides events for the callback loop.
+	// Receives the module (for memory access) and returns (event_code, p1, p2).
+	// If no events, returns (0, 0, 0) for NONE.
+	eventSource func(mod api.Module) (uint32, uint32, uint32)
 }
 
 // NewComponentLinker creates a new ComponentLinker.
@@ -43,6 +47,19 @@ func (cl *ComponentLinker) DefineFunc(moduleName, funcName string, paramTypes, r
 // SetPreCallbackHook sets a function to call before each async callback invocation.
 func (cl *ComponentLinker) SetPreCallbackHook(hook func()) {
 	cl.preCallbackHook = hook
+}
+
+// SetEventSource sets a function that provides events for the callback loop.
+// The function receives the module and returns (event_code, p1, p2) for each event.
+func (cl *ComponentLinker) SetEventSource(source func(mod api.Module) (uint32, uint32, uint32)) {
+	cl.eventSource = source
+}
+
+// SetImportHandler registers a fallback handler that is called when no exact
+// host function match is found for an import. This allows implementing
+// component model lowered functions (e.g., [async-lower] variants) dynamically.
+func (cl *ComponentLinker) SetImportHandler(handler component.ImportHandler) {
+	cl.linker.SetImportHandler(handler)
 }
 
 // InstantiateComponent decodes a component binary, extracts its core modules,
@@ -114,23 +131,33 @@ func (cl *ComponentLinker) InstantiateComponent(
 
 			hf, ok := hm.Funcs[funcName]
 			if !ok {
-				// Auto-stub: create a no-op function matching the import signature.
+				// Function not registered by name. Try the import handler.
 				funcType := mainModule.TypeSection[imp.DescFunc]
 				paramTypes := make([]api.ValueType, len(funcType.Params))
 				copy(paramTypes, funcType.Params)
 				resultTypes := make([]api.ValueType, len(funcType.Results))
 				copy(resultTypes, funcType.Results)
 
-				hf = &component.HostFunc{
-					Name:        funcName,
-					ParamTypes:  paramTypes,
-					ResultTypes: resultTypes,
-					Func: api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+				var fn api.GoModuleFunction
+				if handler := cl.linker.GetImportHandler(); handler != nil {
+					fn = handler(moduleName, funcName, paramTypes, resultTypes)
+				}
+
+				if fn == nil {
+					// Auto-stub: create a no-op function matching the import signature.
+					fn = api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 						// No-op stub: zero-initialize results.
 						for i := range stack[:len(resultTypes)] {
 							stack[i] = 0
 						}
-					}),
+					})
+				}
+
+				hf = &component.HostFunc{
+					Name:        funcName,
+					ParamTypes:  paramTypes,
+					ResultTypes: resultTypes,
+					Func:        fn,
 				}
 			}
 
@@ -175,9 +202,16 @@ func (cl *ComponentLinker) InstantiateComponent(
 // For P3 async components, this uses the [async-lift] entry + callback loop.
 // For P2 components, this calls wasi:cli/run@0.2.0#run.
 func (cl *ComponentLinker) runComponentEntry(ctx context.Context, mod api.Module) error {
-	// Try P3 async entry first.
-	asyncRun := mod.ExportedFunction("[async-lift]wasi:cli/run@0.3.0-rc-2026-02-09#run")
-	callback := mod.ExportedFunction("[callback][async-lift]wasi:cli/run@0.3.0-rc-2026-02-09#run")
+	// Try P3 async entry first. Search for exports matching the async-lift pattern
+	// since the version date may vary across toolchain versions.
+	var asyncRun, callback api.Function
+	for name := range mod.ExportedFunctionDefinitions() {
+		if strings.HasPrefix(name, "[async-lift]wasi:cli/run@") && strings.HasSuffix(name, "#run") {
+			asyncRun = mod.ExportedFunction(name)
+			callback = mod.ExportedFunction("[callback]" + name)
+			break
+		}
+	}
 
 	if asyncRun != nil && callback != nil {
 		return cl.runAsyncEntry(ctx, mod, asyncRun, callback)
@@ -219,15 +253,23 @@ func (cl *ComponentLinker) runAsyncEntry(ctx context.Context, mod api.Module, as
 	)
 
 	code := packed & 0xf
+	iter := 0
 	for code != callbackExit {
+		iter++
+		if iter > 100 {
+			break
+		}
 		if cl.preCallbackHook != nil {
 			cl.preCallbackHook()
 		}
 		// The callback takes (event_code: i32, p1: i32, p2: i32) and returns packed i32.
 		// EventCode: NONE=0, SUBTASK=1, STREAM_READ=2, STREAM_WRITE=3,
 		//            FUTURE_READ=4, FUTURE_WRITE=5, TASK_CANCELLED=6.
-		// For now, deliver NONE events (poll).
-		results, err = callback.Call(ctx, 0, 0, 0)
+		var eventCode, p1, p2 uint32
+		if cl.eventSource != nil {
+			eventCode, p1, p2 = cl.eventSource(mod)
+		}
+		results, err = callback.Call(ctx, uint64(eventCode), uint64(p1), uint64(p2))
 		if err != nil {
 			return err
 		}
