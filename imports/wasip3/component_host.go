@@ -93,17 +93,74 @@ type ComponentHost struct {
 	// insecureSeed caches the insecure seed (must be same on every call).
 	insecureSeed [16]byte
 	insecureSeedOnce sync.Once
+
+	// subtasks tracks pending async subtasks for the component model protocol.
+	subtasks subtaskTable
+}
+
+// subtask represents a pending async-lower subtask.
+type subtask struct {
+	retPtr  uint32 // where to write results in guest memory
+	results []byte // the serialized results to write
+	ready   bool   // whether the subtask has completed
+}
+
+// subtaskTable manages subtask indices and pending results.
+type subtaskTable struct {
+	mu      sync.Mutex
+	entries map[uint32]*subtask
+	nextIdx uint32
+}
+
+func (st *subtaskTable) New(retPtr uint32, results []byte) uint32 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.entries == nil {
+		st.entries = make(map[uint32]*subtask)
+	}
+	st.nextIdx++
+	idx := st.nextIdx
+	st.entries[idx] = &subtask{retPtr: retPtr, results: results, ready: true}
+	return idx
+}
+
+func (st *subtaskTable) PopReady() (uint32, *subtask) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for idx, s := range st.entries {
+		if s.ready {
+			delete(st.entries, idx)
+			return idx, s
+		}
+	}
+	return 0, nil
+}
+
+func (st *subtaskTable) Drop(idx uint32) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	delete(st.entries, idx)
 }
 
 type preopen struct {
-	path string
-	fd   uint32
+	path      string // host path
+	guestPath string // guest-visible path
+	fd        uint32
 }
 
-// streamResource represents an I/O stream resource.
+// streamResource represents one end of a stream. Both ends of a pair
+// point to the same shared resource so that data written to one end
+// can be read from the other.
 type streamResource struct {
 	reader io.Reader
 	writer io.Writer
+}
+
+// futureResource represents a future (single-value async result) resource.
+// Both ends (readable, writable) of a future pair share the same instance.
+type futureResource struct {
+	result []byte // the serialized result to deliver when read
+	ready  bool   // whether the future has a value
 }
 
 // pollableResource represents a pollable resource.
@@ -257,9 +314,33 @@ func (h *ComponentHost) RegisterAll(cl *wazero.ComponentLinker) {
 	h.registerCLI(cl)
 	h.registerCLIp3(cl)
 	h.registerIO(cl)
+	h.registerFilesystem(cl)
 	h.registerBuiltins(cl)
 	// Set the pre-callback hook to restore context before each callback invocation.
 	cl.SetPreCallbackHook(h.contextRestore)
+	// Set event source to deliver subtask events during the callback loop.
+	cl.SetEventSource(h.pollEvent)
+}
+
+// pollEvent returns the next event for the callback loop.
+// It writes subtask results to guest memory before delivering the event.
+func (h *ComponentHost) pollEvent(mod api.Module) (uint32, uint32, uint32) {
+	idx, st := h.subtasks.PopReady()
+	if st != nil {
+		// Write the results to the guest's retPtr.
+		if mem := mod.Memory(); mem != nil && st.results != nil {
+			mem.Write(st.retPtr, st.results)
+		}
+		return 1, idx, 2 // SUBTASK event, subtask index, RETURNED state
+	}
+	return 0, 0, 0 // NONE
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // registerRandom registers wasi:random/* host functions.
@@ -727,6 +808,7 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 		}))
 
 	// contextRestore is used by the async entry loop to restore context before callbacks.
+	// Also used to verify memory hasn't been clobbered.
 	h.contextRestore = func() {
 		saved := h.savedContext0.Load()
 		if saved != 0 {
@@ -748,8 +830,11 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 
 	cl.DefineFunc("$root", "[waitable-set-poll]",
 		[]api.ValueType{i32, i32}, []api.ValueType{i32},
-		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			stack[0] = 0 // Not ready.
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			// Always return 0 (no events). Events are delivered through the callback
+			// event source (pollEvent) to avoid consuming events before the callback
+			// loop can deliver them.
+			stack[0] = 0
 		}))
 
 	cl.DefineFunc("$root", "[waitable-set-drop]",
@@ -767,7 +852,7 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 	cl.DefineFunc("$root", "[subtask-drop]",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			// No-op.
+			h.subtasks.Drop(uint32(stack[0]))
 		}))
 
 	// [export]$root
@@ -777,12 +862,14 @@ func (h *ComponentHost) registerBuiltins(cl *wazero.ComponentLinker) {
 			// No-op.
 		}))
 
-	// [export]wasi:cli/run@0.3.0-rc-2026-02-09
-	cl.DefineFunc("[export]wasi:cli/run@0.3.0-rc-2026-02-09", "[task-return]run",
-		[]api.ValueType{i32}, nil,
-		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			h.taskReturnValue.Store(int32(stack[0]))
-		}))
+	// [export]wasi:cli/run - register task-return for known versions.
+	taskReturnFn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		h.taskReturnValue.Store(int32(stack[0]))
+	})
+	for _, ver := range []string{"0.3.0-rc-2026-02-09", "0.3.0-rc-2026-03-15"} {
+		cl.DefineFunc("[export]wasi:cli/run@"+ver, "[task-return]run",
+			[]api.ValueType{i32}, nil, taskReturnFn)
+	}
 }
 
 // ExitCode returns the exit code if exit() was called, or -1 if not.
