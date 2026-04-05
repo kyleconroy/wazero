@@ -63,7 +63,8 @@ type WazeroRuntime interface {
 // Linker manages host function registrations for component instantiation.
 // It's modeled after wasmtime's component::Linker.
 type Linker struct {
-	hostModules map[string]*HostModule
+	hostModules   map[string]*HostModule
+	importHandler ImportHandler
 }
 
 // NewLinker creates a new empty Linker.
@@ -121,6 +122,21 @@ func (l *Linker) MissingModulesForComponent(comp *Component) []string {
 	}
 	// We'd need to decode the core module to check imports, but that's done at a higher level.
 	return nil
+}
+
+// ImportHandler is called when no exact host function match is found for an import.
+// It receives the module name, function name, and the actual import signature,
+// and returns a host function implementation or nil to fall back to auto-stubbing.
+type ImportHandler func(moduleName, funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction
+
+// SetImportHandler registers a fallback handler for unmatched imports.
+func (l *Linker) SetImportHandler(handler ImportHandler) {
+	l.importHandler = handler
+}
+
+// GetImportHandler returns the registered import handler, if any.
+func (l *Linker) GetImportHandler() ImportHandler {
+	return l.importHandler
 }
 
 // GetHostModule returns the host module registered under the given name,

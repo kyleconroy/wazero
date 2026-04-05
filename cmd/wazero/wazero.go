@@ -343,6 +343,9 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 	if wazero.IsComponent(wasm) {
 		// Component model binary: use the component instantiation path.
 		host := wasip3.NewComponentHost(os.Stdin, stdOut, stdErr, append([]string{wasmExe}, wasmArgs...), parseEnvPairs(env))
+		for _, mp := range parseMountPairs(mounts) {
+			host.AddPreopen(mp.hostPath, mp.guestPath)
+		}
 		_, err = wasip3.InstantiateComponentWithHost(ctx, rt, wasm, conf, host)
 	} else {
 		guest, compileErr := rt.CompileModule(compilationCtx, wasm)
@@ -384,6 +387,12 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 
 	// We're done, _start was called as part of instantiating the module.
 	return 0
+}
+
+// mountPair is a host-to-guest directory mapping.
+type mountPair struct {
+	hostPath  string
+	guestPath string
 }
 
 func validateMounts(mounts sliceFlag, stdErr logging.Writer) (rc int, rootPath string, config wazero.FSConfig) {
@@ -436,6 +445,29 @@ func validateMounts(mounts sliceFlag, stdErr logging.Writer) (rc int, rootPath s
 		}
 	}
 	return 0, rootPath, config
+}
+
+// parseMountPairs extracts (hostPath, guestPath) pairs from mount flags.
+func parseMountPairs(mounts sliceFlag) []mountPair {
+	var pairs []mountPair
+	for _, mount := range mounts {
+		if len(mount) == 0 {
+			continue
+		}
+		mount = strings.TrimSuffix(mount, ":ro")
+		var dir, guestPath string
+		if clnIdx := strings.LastIndexByte(mount, ':'); clnIdx != -1 {
+			dir, guestPath = mount[:clnIdx], mount[clnIdx+1:]
+		} else {
+			dir = mount
+			guestPath = dir
+		}
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+		pairs = append(pairs, mountPair{hostPath: dir, guestPath: guestPath})
+	}
+	return pairs
 }
 
 // validateListens returns a non-nil net.Config, if there were any listen flags.
