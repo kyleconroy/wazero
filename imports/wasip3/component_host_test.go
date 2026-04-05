@@ -239,3 +239,108 @@ func TestFilesystemHardLinks(t *testing.T) {
 func TestFilesystemDotdot(t *testing.T) {
 	runFSTest(t, "filesystem-dotdot", copyTestDir(t))
 }
+
+func TestCliStdioRoundtrip(t *testing.T) {
+	_, err := instantiateP3(t, "cli-stdio-roundtrip.wasm", []string{"cli-stdio-roundtrip"}, nil)
+	if err != nil {
+		t.Errorf("cli-stdio-roundtrip failed: %v", err)
+	}
+}
+
+func TestHttpFields(t *testing.T) {
+	_, err := instantiateP3(t, "http-fields.wasm", []string{"http-fields"}, nil)
+	if err != nil {
+		t.Errorf("http-fields failed: %v", err)
+	}
+}
+
+func TestHttpRequest(t *testing.T) {
+	_, err := instantiateP3(t, "http-request.wasm", []string{"http-request"}, nil)
+	if err != nil {
+		t.Errorf("http-request failed: %v", err)
+	}
+}
+
+func TestHttpResponse(t *testing.T) {
+	_, err := instantiateP3(t, "http-response.wasm", []string{"http-response"}, nil)
+	if err != nil {
+		t.Errorf("http-response failed: %v", err)
+	}
+}
+
+func TestHttpService(t *testing.T) {
+	_, err := instantiateP3(t, "http-service.wasm", []string{"http-service"}, nil)
+	if err != nil {
+		t.Errorf("http-service failed: %v", err)
+	}
+}
+
+func TestSocketsEcho(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-echo.wasm", []string{"sockets-echo"}, nil)
+	if err != nil {
+		t.Errorf("sockets-echo failed: %v", err)
+	}
+}
+
+func TestSocketsTcpBind(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-tcp-bind.wasm", []string{"sockets-tcp-bind"}, nil)
+	if err != nil {
+		t.Errorf("sockets-tcp-bind failed: %v", err)
+	}
+}
+
+func TestSocketsTcpConnect(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-tcp-connect.wasm", []string{"sockets-tcp-connect"}, nil)
+	if err != nil {
+		t.Errorf("sockets-tcp-connect failed: %v", err)
+	}
+}
+
+func TestSocketsTcpListen(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-tcp-listen.wasm", []string{"sockets-tcp-listen"}, nil)
+	if err != nil {
+		t.Errorf("sockets-tcp-listen failed: %v", err)
+	}
+}
+
+func TestSocketsTcpReceive(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-tcp-receive.wasm", []string{"sockets-tcp-receive"}, nil)
+	if err != nil {
+		t.Errorf("sockets-tcp-receive failed: %v", err)
+	}
+}
+
+func TestSocketsTcpSend(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-tcp-send.wasm", []string{"sockets-tcp-send"}, nil)
+	if err != nil {
+		t.Errorf("sockets-tcp-send failed: %v", err)
+	}
+}
+
+func TestSocketsUdpBind(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-udp-bind.wasm", []string{"sockets-udp-bind"}, nil)
+	if err != nil {
+		t.Errorf("sockets-udp-bind failed: %v", err)
+	}
+}
+
+func TestSocketsUdpConnect(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-udp-connect.wasm", []string{"sockets-udp-connect"}, nil)
+	if err != nil {
+		t.Errorf("sockets-udp-connect failed: %v", err)
+	}
+}
+
+func TestSocketsUdpReceive(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-udp-receive.wasm", []string{"sockets-udp-receive"}, nil)
+	if err != nil {
+		t.Errorf("sockets-udp-receive failed: %v", err)
+	}
+}
+
+func TestSocketsUdpSend(t *testing.T) {
+	_, err := instantiateP3(t, "sockets-udp-send.wasm", []string{"sockets-udp-send"}, nil)
+	if err != nil {
+		t.Errorf("sockets-udp-send failed: %v", err)
+	}
+}
