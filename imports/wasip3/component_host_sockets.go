@@ -50,11 +50,6 @@ type udpSocketResource struct {
 	remoteAddr *net.UDPAddr
 }
 
-// tcpConnectionResource wraps an accepted TCP connection.
-type tcpConnectionResource struct {
-	conn *net.TCPConn
-}
-
 // tcpListenerStream wraps a TCP listener as a stream resource for accepting connections.
 type tcpListenerStream struct {
 	listener    *net.TCPListener
@@ -475,7 +470,6 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 			}
 			sock := res.(*udpSocketResource)
 			sock.mu.Lock()
-			conn := sock.conn
 			remoteAddr := sock.remoteAddr
 			family := sock.family
 			sock.mu.Unlock()
@@ -592,7 +586,7 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 					sock.addr = &net.UDPAddr{IP: net.IPv6loopback, Port: 0}
 				}
 			}
-			conn = sock.conn
+			conn := sock.conn
 			sock.mu.Unlock()
 
 			// Send the data.
@@ -600,9 +594,9 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 			if len(data) > 0 {
 				if conn != nil {
 					if remoteAddr != nil {
-						conn.Write(data)
+						_, _ = conn.Write(data)
 					} else {
-						conn.WriteToUDP(data, targetAddr)
+						_, _ = conn.WriteToUDP(data, targetAddr)
 					}
 				} else if targetAddr != nil {
 					// Simulated (IPv6) socket: deliver to mailbox.
@@ -709,9 +703,9 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 
 			// Try non-blocking read first.
 			buf := make([]byte, 65536)
-			conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+			_ = conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 			n, senderAddr, err := conn.ReadFromUDP(buf)
-			conn.SetReadDeadline(time.Time{})
+			_ = conn.SetReadDeadline(time.Time{})
 
 			if err == nil {
 				// Data available - write result synchronously.
@@ -726,9 +720,9 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 
 			go func() {
 				readBuf := make([]byte, 65536)
-				conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 				n, addr, err := conn.ReadFromUDP(readBuf)
-				conn.SetReadDeadline(time.Time{})
+				_ = conn.SetReadDeadline(time.Time{})
 
 				if err != nil {
 					// Error - return err result.

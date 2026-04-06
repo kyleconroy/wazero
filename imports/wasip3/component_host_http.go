@@ -720,7 +720,7 @@ func (h *ComponentHost) httpImportHandler(moduleName, funcName string, paramType
 				mem.WriteByte(retPtr, 8)
 			default:
 				mem.WriteByte(retPtr, 9) // other
-				writeListToMemory(ctx, mod, retPtr+4, []byte(req.method))
+				_ = writeListToMemory(ctx, mod, retPtr+4, []byte(req.method))
 			}
 		})
 
@@ -796,7 +796,7 @@ func (h *ComponentHost) httpImportHandler(moduleName, funcName string, paramType
 				mem.WriteByte(retPtr, 0) // none
 			} else {
 				mem.WriteByte(retPtr, 1) // some
-				writeListToMemory(ctx, mod, retPtr+4, []byte(req.path))
+				_ = writeListToMemory(ctx, mod, retPtr+4, []byte(req.path))
 			}
 		})
 
@@ -868,7 +868,7 @@ func (h *ComponentHost) httpImportHandler(moduleName, funcName string, paramType
 					mem.WriteByte(retPtr+4, 1)
 				default:
 					mem.WriteByte(retPtr+4, 2)
-					writeListToMemory(ctx, mod, retPtr+8, []byte(req.scheme))
+					_ = writeListToMemory(ctx, mod, retPtr+8, []byte(req.scheme))
 				}
 			}
 		})
@@ -947,7 +947,7 @@ func (h *ComponentHost) httpImportHandler(moduleName, funcName string, paramType
 				mem.WriteByte(retPtr, 0)
 			} else {
 				mem.WriteByte(retPtr, 1)
-				writeListToMemory(ctx, mod, retPtr+4, []byte(req.authority))
+				_ = writeListToMemory(ctx, mod, retPtr+4, []byte(req.authority))
 			}
 		})
 

@@ -196,7 +196,6 @@ func (st *subtaskTable) Drop(idx uint32) {
 type preopen struct {
 	path      string // host path
 	guestPath string // guest-visible path
-	fd        uint32
 }
 
 // streamResource represents one end of a stream. Both ends of a pair
@@ -464,12 +463,6 @@ func (h *ComponentHost) pollEvent(mod api.Module) (uint32, uint32, uint32) {
 	return 0, 0, 0 // NONE
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 // registerRandom registers wasi:random/* host functions.
 func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
@@ -478,7 +471,7 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 		nil, []api.ValueType{i64},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			var buf [8]byte
-			h.randSource.Read(buf[:])
+			_, _ = h.randSource.Read(buf[:])
 			stack[0] = binary.LittleEndian.Uint64(buf[:])
 		}))
 
@@ -488,8 +481,8 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 			length := uint32(stack[0])
 			retPtr := uint32(stack[1])
 			buf := make([]byte, length)
-			h.randSource.Read(buf)
-			writeListToMemory(ctx, mod, retPtr, buf)
+			_, _ = h.randSource.Read(buf)
+			_ = writeListToMemory(ctx, mod, retPtr, buf)
 		}))
 
 	// wasi:random/insecure@0.3.0-rc-2026-03-15
@@ -497,7 +490,7 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 		nil, []api.ValueType{i64},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			var buf [8]byte
-			h.randSource.Read(buf[:])
+			_, _ = h.randSource.Read(buf[:])
 			stack[0] = binary.LittleEndian.Uint64(buf[:])
 		}))
 
@@ -507,8 +500,8 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 			length := uint32(stack[0])
 			retPtr := uint32(stack[1])
 			buf := make([]byte, length)
-			h.randSource.Read(buf)
-			writeListToMemory(ctx, mod, retPtr, buf)
+			_, _ = h.randSource.Read(buf)
+			_ = writeListToMemory(ctx, mod, retPtr, buf)
 		}))
 
 	// wasi:random/insecure-seed@0.3.0-rc-2026-03-15
@@ -523,7 +516,7 @@ func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {
 			// Return two u64 values (seed1, seed2) at retPtr.
 			// Must return the same seed on every call within the same instance.
 			h.insecureSeedOnce.Do(func() {
-				h.randSource.Read(h.insecureSeed[:])
+				_, _ = h.randSource.Read(h.insecureSeed[:])
 			})
 			mem.Write(retPtr, h.insecureSeed[:])
 		}))
@@ -596,7 +589,7 @@ func (h *ComponentHost) registerCLI(cl *wazero.ComponentLinker) {
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
-			writeStringPairListToMemory(ctx, mod, retPtr, h.env)
+			_ = writeStringPairListToMemory(ctx, mod, retPtr, h.env)
 		}))
 
 	// wasi:cli/exit@0.2.0
@@ -699,14 +692,14 @@ func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
-			writeStringPairListToMemory(ctx, mod, retPtr, h.env)
+			_ = writeStringPairListToMemory(ctx, mod, retPtr, h.env)
 		}))
 
 	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-03-15", "get-arguments",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[0])
-			writeStringListToMemory(ctx, mod, retPtr, h.args)
+			_ = writeStringListToMemory(ctx, mod, retPtr, h.args)
 		}))
 
 	cl.DefineFunc("wasi:cli/environment@0.3.0-rc-2026-03-15", "get-initial-cwd",
@@ -883,7 +876,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			res, found := h.resources.Get(selfHandle)
 			if found {
 				if sr, ok := res.(*streamResource); ok && sr.writer != nil {
-					sr.writer.Write(data)
+					_, _ = sr.writer.Write(data)
 				}
 			}
 
