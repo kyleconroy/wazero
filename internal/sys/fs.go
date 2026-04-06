@@ -57,14 +57,6 @@ type FileEntry struct {
 	// and FD_RSYNC are stored here since the File interface doesn't expose them.
 	FdFlags uint16
 
-	// RightsBase stores the WASI fs_rights_base for this fd, so that
-	// fd_fdstat_set_rights can restrict them and fd_fdstat_get can report them.
-	// A value of 0 means not yet initialized (use defaults).
-	RightsBase uint32
-
-	// RightsInheriting stores the WASI fs_rights_inheriting for this fd.
-	RightsInheriting uint32
-
 	// direntCache is nil until DirentCache was called.
 	direntCache *DirentCache
 }
