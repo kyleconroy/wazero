@@ -154,10 +154,10 @@ func (f *goFS) OpenFile(string, int, fs.FileMode) (*os.File, error) {
 
 func (f *goFS) Mkdir(string, fs.FileMode) error { return errReadOnly }
 func (f *goFS) Remove(string) error             { return errReadOnly }
-func (f *goFS) Rename(string, string) error      { return errReadOnly }
-func (f *goFS) Link(string, string) error        { return errReadOnly }
-func (f *goFS) Symlink(string, string) error     { return errReadOnly }
-func (f *goFS) Truncate(string, int64) error     { return errReadOnly }
+func (f *goFS) Rename(string, string) error     { return errReadOnly }
+func (f *goFS) Link(string, string) error       { return errReadOnly }
+func (f *goFS) Symlink(string, string) error    { return errReadOnly }
+func (f *goFS) Truncate(string, int64) error    { return errReadOnly }
 func (f *goFS) Chtimes(string, time.Time, time.Time) error {
 	return errReadOnly
 }
@@ -264,8 +264,8 @@ func seekOrSkip(f fs.File, offset int64) {
 		return
 	}
 	if seeker, ok := f.(io.Seeker); ok {
-		seeker.Seek(offset, io.SeekStart)
+		_, _ = seeker.Seek(offset, io.SeekStart)
 		return
 	}
-	io.CopyN(io.Discard, f, offset)
+	_, _ = io.CopyN(io.Discard, f, offset)
 }
