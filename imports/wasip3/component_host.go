@@ -99,7 +99,7 @@ type ComponentHost struct {
 	contextRestore func()
 
 	// insecureSeed caches the insecure seed (must be same on every call).
-	insecureSeed [16]byte
+	insecureSeed     [16]byte
 	insecureSeedOnce sync.Once
 
 	// subtasks tracks pending async subtasks for the component model protocol.
@@ -125,10 +125,10 @@ type asyncEvent struct {
 
 // subtask represents a pending async-lower subtask.
 type subtask struct {
-	retPtr    uint32                // where to write results in guest memory
-	results   []byte                // the serialized results to write
+	retPtr    uint32                            // where to write results in guest memory
+	results   []byte                            // the serialized results to write
 	resultsFn func(context.Context, api.Module) // called to write results (for list allocation)
-	ready     bool                  // whether the subtask has completed
+	ready     bool                              // whether the subtask has completed
 }
 
 // subtaskTable manages subtask indices and pending results.
@@ -436,7 +436,6 @@ func (h *ComponentHost) genericImportHandler(moduleName, funcName string, paramT
 	return nil
 }
 
-
 // pollEvent returns the next event for the callback loop.
 // It writes subtask results to guest memory before delivering the event.
 func (h *ComponentHost) pollEvent(mod api.Module) (uint32, uint32, uint32) {
@@ -462,7 +461,6 @@ func (h *ComponentHost) pollEvent(mod api.Module) (uint32, uint32, uint32) {
 
 	return 0, 0, 0 // NONE
 }
-
 
 // registerRandom registers wasi:random/* host functions.
 func (h *ComponentHost) registerRandom(cl *wazero.ComponentLinker) {

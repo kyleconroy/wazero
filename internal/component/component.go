@@ -105,16 +105,16 @@ type CoreExportItem struct {
 type ExternKind byte
 
 const (
-	ExternKindCoreModule  ExternKind = 0x00
-	ExternKindFunc        ExternKind = 0x01
-	ExternKindValue       ExternKind = 0x02
-	ExternKindType        ExternKind = 0x03
-	ExternKindComponent   ExternKind = 0x04
-	ExternKindInstance    ExternKind = 0x05
-	ExternKindCoreFunc    ExternKind = 0x10
-	ExternKindCoreTable   ExternKind = 0x11
-	ExternKindCoreMemory  ExternKind = 0x12
-	ExternKindCoreGlobal  ExternKind = 0x13
+	ExternKindCoreModule ExternKind = 0x00
+	ExternKindFunc       ExternKind = 0x01
+	ExternKindValue      ExternKind = 0x02
+	ExternKindType       ExternKind = 0x03
+	ExternKindComponent  ExternKind = 0x04
+	ExternKindInstance   ExternKind = 0x05
+	ExternKindCoreFunc   ExternKind = 0x10
+	ExternKindCoreTable  ExternKind = 0x11
+	ExternKindCoreMemory ExternKind = 0x12
+	ExternKindCoreGlobal ExternKind = 0x13
 )
 
 // Import is a component-level import.
@@ -194,11 +194,11 @@ type CanonicalOption struct {
 type CanonicalOptionKind byte
 
 const (
-	CanonicalOptionUTF8    CanonicalOptionKind = 0x00
-	CanonicalOptionUTF16   CanonicalOptionKind = 0x01
-	CanonicalOptionLatin1  CanonicalOptionKind = 0x02
-	CanonicalOptionMemory  CanonicalOptionKind = 0x03
-	CanonicalOptionRealloc CanonicalOptionKind = 0x04
+	CanonicalOptionUTF8       CanonicalOptionKind = 0x00
+	CanonicalOptionUTF16      CanonicalOptionKind = 0x01
+	CanonicalOptionLatin1     CanonicalOptionKind = 0x02
+	CanonicalOptionMemory     CanonicalOptionKind = 0x03
+	CanonicalOptionRealloc    CanonicalOptionKind = 0x04
 	CanonicalOptionPostReturn CanonicalOptionKind = 0x05
 )
 
@@ -221,8 +221,8 @@ type Instance struct {
 type InstanceKind byte
 
 const (
-	InstanceKindInstantiate  InstanceKind = 0x00
-	InstanceKindFromExports  InstanceKind = 0x01
+	InstanceKindInstantiate InstanceKind = 0x00
+	InstanceKindFromExports InstanceKind = 0x01
 )
 
 // Alias allows referencing items from other instances or the outer component.

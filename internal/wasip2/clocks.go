@@ -9,13 +9,13 @@ import (
 )
 
 const (
-	clockResGetName          = "resolution"
-	clockTimeGetName         = "now"
+	clockResGetName            = "resolution"
+	clockTimeGetName           = "now"
 	clockSubscribeDurationName = "subscribe-duration"
 	clockSubscribeInstantName  = "subscribe-instant"
 
-	wallClockResGetName  = "resolution"
-	wallClockNowName     = "now"
+	wallClockResGetName = "resolution"
+	wallClockNowName    = "now"
 )
 
 // MonotonicClockResolution implements wasi:clocks/monotonic-clock.resolution.

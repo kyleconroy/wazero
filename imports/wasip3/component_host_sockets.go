@@ -33,7 +33,7 @@ type tcpSocketResource struct {
 	family    uint8 // 0=IPv4, 1=IPv6
 	listener  *net.TCPListener
 	conn      *net.TCPConn
-	pipeConn  net.Conn // for simulated IPv6 connections (net.Pipe)
+	pipeConn  net.Conn     // for simulated IPv6 connections (net.Pipe)
 	addr      *net.TCPAddr // bound address
 	connected bool         // true if connect succeeded (even simulated)
 	listening bool         // true if listen was called
@@ -54,7 +54,7 @@ type udpSocketResource struct {
 type tcpListenerStream struct {
 	listener    *net.TCPListener
 	acceptCh    chan net.Conn // for simulated (IPv6) listeners
-	pendingConn net.Conn     // cached connection from background accept
+	pendingConn net.Conn      // cached connection from background accept
 	host        *ComponentHost
 }
 
@@ -136,12 +136,13 @@ func (h *ComponentHost) registerSockets(cl *wazero.ComponentLinker) {}
 
 // writeUDPReceiveResult writes a successful receive result to retPtr.
 // Result layout: result<tuple<list<u8>, ip-socket-address>, error-code>
-//   +0:  disc=0 (ok)
-//   +4:  list ptr (u32) - allocated via cabi_realloc
-//   +8:  list len (u32)
-//   +12: ip-socket-address disc (u8) - 0=IPv4, 1=IPv6
-//   For IPv4: +16: port(u16), +18: a,b,c,d
-//   For IPv6: +16: port(u16), +20: flow-info(u32), +24: addr(u16×8), +40: scope-id(u32)
+//
+//	+0:  disc=0 (ok)
+//	+4:  list ptr (u32) - allocated via cabi_realloc
+//	+8:  list len (u32)
+//	+12: ip-socket-address disc (u8) - 0=IPv4, 1=IPv6
+//	For IPv4: +16: port(u16), +18: a,b,c,d
+//	For IPv6: +16: port(u16), +20: flow-info(u32), +24: addr(u16×8), +40: scope-id(u32)
 func writeUDPReceiveResult(ctx context.Context, mod api.Module, retPtr uint32, data []byte, addr *net.UDPAddr) {
 	mem := mod.Memory()
 	if mem == nil {
@@ -359,7 +360,7 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 
 			if !connected || alreadySending {
 				// Write Err(invalid-state) to retPtr.
-				mem.WriteByte(retPtr, 1)   // err discriminant
+				mem.WriteByte(retPtr, 1) // err discriminant
 				mem.WriteByte(retPtr+4, errInvalidState)
 				stack[0] = 2 // RETURNED
 				return

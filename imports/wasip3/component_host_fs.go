@@ -440,9 +440,9 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			mem.WriteByte(retPtr, 0)                       // ok
+			mem.WriteByte(retPtr, 0)                           // ok
 			mem.WriteByte(retPtr+4, fileModeToDT(info.Mode())) // descriptor-type disc
-			mem.WriteByte(retPtr+8, 0)                     // option<string> = None
+			mem.WriteByte(retPtr+8, 0)                         // option<string> = None
 			stack[0] = 2
 		})
 
@@ -1803,7 +1803,7 @@ func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramT
 							resultCode = 0x10 // COMPLETED(1)
 						}
 						host.asyncEvents <- asyncEvent{
-							eventType: 2,           // STREAM_READ
+							eventType: 2,            // STREAM_READ
 							p1:        streamHandle, // stream handle
 							p2:        resultCode,
 						}

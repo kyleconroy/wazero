@@ -122,7 +122,7 @@ func isValidPathChar(c byte) bool {
 	}
 	switch c {
 	case '-', '.', '_', '~', // unreserved
-		'%',                      // pct-encoded
+		'%',                                                    // pct-encoded
 		'!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', // sub-delims
 		':', '@', // pchar extras
 		'/', '?': // path/query separators
@@ -148,7 +148,7 @@ func isValidAuthorityChar(c byte) bool {
 	}
 	switch c {
 	case '-', '.', '_', '~', // unreserved
-		'%',                      // pct-encoded
+		'%',                                                    // pct-encoded
 		'!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=': // sub-delims
 		return true
 	}
