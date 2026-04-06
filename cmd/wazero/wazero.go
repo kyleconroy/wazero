@@ -342,10 +342,12 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 
 	if wazero.IsComponent(wasm) {
 		// Component model binary: use the component instantiation path.
-		host := wasip3.NewComponentHost(os.Stdin, stdOut, stdErr, append([]string{wasmExe}, wasmArgs...), parseEnvPairs(env))
+		fsConfig := wasip3.NewFSConfig()
 		for _, mp := range parseMountPairs(mounts) {
-			host.AddPreopen(mp.hostPath, mp.guestPath)
+			fsConfig = fsConfig.WithDirMount(mp.hostPath, mp.guestPath)
 		}
+		host := wasip3.NewComponentHost(os.Stdin, stdOut, stdErr, append([]string{wasmExe}, wasmArgs...), parseEnvPairs(env)).
+			WithFSConfig(fsConfig)
 		_, err = wasip3.InstantiateComponentWithHost(ctx, rt, wasm, conf, host)
 	} else {
 		guest, compileErr := rt.CompileModule(compilationCtx, wasm)

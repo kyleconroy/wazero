@@ -58,7 +58,8 @@ func main() {
 	)
 
 	// Optionally mount host directories into the component's filesystem:
-	// host.AddPreopen("/path/on/host", "/path/in/guest")
+	// fsConfig := wasip3.NewFSConfig().WithDirMount("/path/on/host", "/path/in/guest")
+	// host.WithFSConfig(fsConfig)
 
 	// Instantiate the component. This:
 	// 1. Decodes the component binary and extracts its core modules

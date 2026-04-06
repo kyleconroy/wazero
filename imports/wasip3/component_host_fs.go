@@ -88,24 +88,67 @@ const (
 	ecCrossDevice     = 35
 )
 
-// AddPreopen adds a host directory preopen to the component host.
-// The directory at hostPath is mounted at guestPath in the component's filesystem.
-func (h *ComponentHost) AddPreopen(hostPath, guestPath string) {
-	h.preopens = append(h.preopens, preopen{fs: &hostPathFS{root: hostPath}, guestPath: guestPath})
+// FSConfig configures filesystem paths the embedding host allows the wasm
+// guest to access. Unconfigured paths are not allowed.
+//
+// FSConfig is immutable. Each WithXXX function returns a new instance
+// including the corresponding change.
+type FSConfig struct {
+	preopens []preopen
 }
 
-// AddFS adds a read-only fs.FS preopen to the component host.
-// Write operations on this mount will return errors.
-func (h *ComponentHost) AddFS(fsys fs.FS, guestPath string) {
-	h.preopens = append(h.preopens, preopen{fs: &goFS{fsys: fsys, name: guestPath}, guestPath: guestPath})
+// NewFSConfig returns an empty FSConfig.
+func NewFSConfig() *FSConfig {
+	return &FSConfig{}
 }
 
-// AddRoot adds an os.Root preopen to the component host.
+// WithDirMount assigns a directory at dir to any paths beginning at guestPath.
+//
+// The guest will have full read-write access to this directory.
+func (c *FSConfig) WithDirMount(dir, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &hostPathFS{root: dir}, guestPath: guestPath})
+	return ret
+}
+
+// WithReadOnlyDirMount assigns a directory at dir to any paths beginning at
+// guestPath. This is the same as WithDirMount except only read operations are
+// permitted.
+func (c *FSConfig) WithReadOnlyDirMount(dir, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &goFS{fsys: os.DirFS(dir), name: guestPath}, guestPath: guestPath})
+	return ret
+}
+
+// WithFSMount assigns an fs.FS file system for any paths beginning at
+// guestPath. The fs.FS is read-only; write operations will return errors.
+func (c *FSConfig) WithFSMount(fsys fs.FS, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &goFS{fsys: fsys, name: guestPath}, guestPath: guestPath})
+	return ret
+}
+
+// WithRootMount assigns an os.Root for any paths beginning at guestPath.
 // The Root provides sandboxed filesystem access that prevents path traversal
 // outside the root directory. Some operations (rename, link, symlink, chtimes)
 // are not available through os.Root in Go 1.24 and will return errors.
-func (h *ComponentHost) AddRoot(root *os.Root, guestPath string) {
-	h.preopens = append(h.preopens, preopen{fs: &rootFS{root: root}, guestPath: guestPath})
+func (c *FSConfig) WithRootMount(root *os.Root, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &rootFS{root: root}, guestPath: guestPath})
+	return ret
+}
+
+func (c *FSConfig) clone() *FSConfig {
+	ret := &FSConfig{}
+	ret.preopens = make([]preopen, len(c.preopens))
+	copy(ret.preopens, c.preopens)
+	return ret
+}
+
+// WithFSConfig sets the filesystem configuration for the component host.
+func (h *ComponentHost) WithFSConfig(config *FSConfig) *ComponentHost {
+	h.preopens = append(h.preopens, config.preopens...)
+	return h
 }
 
 // registerFilesystem registers wasi:filesystem/* host functions and the import handler.
