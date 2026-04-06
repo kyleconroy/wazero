@@ -32,7 +32,7 @@ const (
 
 	// IO interfaces.
 	IOErrorName   = "wasi:io/error@0.3.0"
-	IOStreamsName  = "wasi:io/streams@0.3.0"
+	IOStreamsName = "wasi:io/streams@0.3.0"
 	IOPollName    = "wasi:io/poll@0.3.0"
 
 	// Filesystem interfaces.

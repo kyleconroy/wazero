@@ -24,20 +24,20 @@ const (
 
 	// IO interfaces.
 	IOErrorName   = "wasi:io/error@0.2.0"
-	IOStreamsName  = "wasi:io/streams@0.2.0"
+	IOStreamsName = "wasi:io/streams@0.2.0"
 	IOPollName    = "wasi:io/poll@0.2.0"
 
 	// Random interfaces.
-	RandomRandomName  = "wasi:random/random@0.2.0"
+	RandomRandomName       = "wasi:random/random@0.2.0"
 	RandomInsecureName     = "wasi:random/insecure@0.2.0"
 	RandomInsecureSeedName = "wasi:random/insecure-seed@0.2.0"
 
 	// CLI interfaces.
-	CLIStdinName      = "wasi:cli/stdin@0.2.0"
-	CLIStdoutName     = "wasi:cli/stdout@0.2.0"
-	CLIStderrName     = "wasi:cli/stderr@0.2.0"
-	CLIEnvironmentName = "wasi:cli/environment@0.2.0"
-	CLIExitName       = "wasi:cli/exit@0.2.0"
+	CLIStdinName          = "wasi:cli/stdin@0.2.0"
+	CLIStdoutName         = "wasi:cli/stdout@0.2.0"
+	CLIStderrName         = "wasi:cli/stderr@0.2.0"
+	CLIEnvironmentName    = "wasi:cli/environment@0.2.0"
+	CLIExitName           = "wasi:cli/exit@0.2.0"
 	CLITerminalInputName  = "wasi:cli/terminal-input@0.2.0"
 	CLITerminalOutputName = "wasi:cli/terminal-output@0.2.0"
 	CLITerminalStdinName  = "wasi:cli/terminal-stdin@0.2.0"
@@ -45,18 +45,18 @@ const (
 	CLITerminalStderrName = "wasi:cli/terminal-stderr@0.2.0"
 
 	// Sockets interfaces.
-	SocketsTCPName            = "wasi:sockets/tcp@0.2.0"
+	SocketsTCPName             = "wasi:sockets/tcp@0.2.0"
 	SocketsTCPCreateSocketName = "wasi:sockets/tcp-create-socket@0.2.0"
-	SocketsUDPName            = "wasi:sockets/udp@0.2.0"
+	SocketsUDPName             = "wasi:sockets/udp@0.2.0"
 	SocketsUDPCreateSocketName = "wasi:sockets/udp-create-socket@0.2.0"
-	SocketsNetworkName        = "wasi:sockets/network@0.2.0"
+	SocketsNetworkName         = "wasi:sockets/network@0.2.0"
 	SocketsInstanceNetworkName = "wasi:sockets/instance-network@0.2.0"
-	SocketsIPNameLookupName   = "wasi:sockets/ip-name-lookup@0.2.0"
+	SocketsIPNameLookupName    = "wasi:sockets/ip-name-lookup@0.2.0"
 
 	// HTTP interfaces.
-	HTTPTypesName            = "wasi:http/types@0.2.0"
-	HTTPOutgoingHandlerName  = "wasi:http/outgoing-handler@0.2.0"
-	HTTPIncomingHandlerName  = "wasi:http/incoming-handler@0.2.0"
+	HTTPTypesName           = "wasi:http/types@0.2.0"
+	HTTPOutgoingHandlerName = "wasi:http/outgoing-handler@0.2.0"
+	HTTPIncomingHandlerName = "wasi:http/incoming-handler@0.2.0"
 )
 
 // World names for WASI Preview 2.
@@ -70,7 +70,7 @@ const (
 
 // Error codes for WASI p2 stream operations.
 const (
-	StreamErrorClosed     uint8 = 0
+	StreamErrorClosed              uint8 = 0
 	StreamErrorLastOperationFailed uint8 = 1
 )
 

@@ -651,15 +651,17 @@ func Test_fdFdstatSetFlags(t *testing.T) {
 	})
 }
 
-// Test_fdFdstatSetRights tests the implementation of fd_fdstat_set_rights.
+// Test_fdFdstatSetRights only tests it is stubbed for GrainLang per #271
 func Test_fdFdstatSetRights(t *testing.T) {
-	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().
-		WithFSConfig(wazero.NewFSConfig().WithDirMount(t.TempDir(), "/")))
+	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().WithFS(fstest.FS))
 	defer r.Close(testCtx)
 
-	// fd=3 is the preopen directory. Setting rights to 0 (reducing all) should succeed.
-	requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.FdFdstatSetRightsName, uint64(3), uint64(0), uint64(0))
-	require.Contains(t, log.String(), "ESUCCESS")
+	requireErrnoResult(t, wasip1.ErrnoNosys, mod, wasip1.FdFdstatSetRightsName, uint64(math.MaxUint32), 0, 0)
+
+	require.Equal(t, `
+==> wasi_snapshot_preview1.fd_fdstat_set_rights(fd=-1,fs_rights_base=,fs_rights_inheriting=)
+<== errno=ENOSYS
+`, "\n"+log.String())
 }
 
 func Test_fdFilestatGet(t *testing.T) {

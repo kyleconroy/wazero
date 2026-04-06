@@ -79,19 +79,19 @@ const (
 type PrimitiveValType byte
 
 const (
-	PrimitiveValTypeBool    PrimitiveValType = 0x7f
-	PrimitiveValTypeS8      PrimitiveValType = 0x7e
-	PrimitiveValTypeU8      PrimitiveValType = 0x7d
-	PrimitiveValTypeS16     PrimitiveValType = 0x7c
-	PrimitiveValTypeU16     PrimitiveValType = 0x7b
-	PrimitiveValTypeS32     PrimitiveValType = 0x7a
-	PrimitiveValTypeU32     PrimitiveValType = 0x79
-	PrimitiveValTypeS64     PrimitiveValType = 0x78
-	PrimitiveValTypeU64     PrimitiveValType = 0x77
-	PrimitiveValTypeF32     PrimitiveValType = 0x76
-	PrimitiveValTypeF64     PrimitiveValType = 0x75
-	PrimitiveValTypeChar    PrimitiveValType = 0x74
-	PrimitiveValTypeString  PrimitiveValType = 0x73
+	PrimitiveValTypeBool   PrimitiveValType = 0x7f
+	PrimitiveValTypeS8     PrimitiveValType = 0x7e
+	PrimitiveValTypeU8     PrimitiveValType = 0x7d
+	PrimitiveValTypeS16    PrimitiveValType = 0x7c
+	PrimitiveValTypeU16    PrimitiveValType = 0x7b
+	PrimitiveValTypeS32    PrimitiveValType = 0x7a
+	PrimitiveValTypeU32    PrimitiveValType = 0x79
+	PrimitiveValTypeS64    PrimitiveValType = 0x78
+	PrimitiveValTypeU64    PrimitiveValType = 0x77
+	PrimitiveValTypeF32    PrimitiveValType = 0x76
+	PrimitiveValTypeF64    PrimitiveValType = 0x75
+	PrimitiveValTypeChar   PrimitiveValType = 0x74
+	PrimitiveValTypeString PrimitiveValType = 0x73
 )
 
 // PrimitiveValTypeName returns a human-readable name for the primitive type.

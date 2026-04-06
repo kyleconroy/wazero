@@ -10,12 +10,12 @@ import (
 
 // wasi:cli function names.
 const (
-	cliGetStdinName     = "get-stdin"
-	cliGetStdoutName    = "get-stdout"
-	cliGetStderrName    = "get-stderr"
+	cliGetStdinName       = "get-stdin"
+	cliGetStdoutName      = "get-stdout"
+	cliGetStderrName      = "get-stderr"
 	cliGetEnvironmentName = "get-environment"
-	cliExitName         = "exit"
-	cliGetArgsName      = "get-arguments"
+	cliExitName           = "exit"
+	cliGetArgsName        = "get-arguments"
 )
 
 // CLIGetStdin implements wasi:cli/stdin.get-stdin.

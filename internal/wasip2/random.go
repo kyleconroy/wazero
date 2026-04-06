@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	randomGetRandomBytesName  = "get-random-bytes"
-	randomGetRandomU64Name    = "get-random-u64"
+	randomGetRandomBytesName   = "get-random-bytes"
+	randomGetRandomU64Name     = "get-random-u64"
 	insecureGetRandomBytesName = "get-insecure-random-bytes"
 	insecureGetRandomU64Name   = "get-insecure-random-u64"
 	insecureSeedName           = "insecure-seed"

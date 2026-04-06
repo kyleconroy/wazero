@@ -11,11 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	wzsys "github.com/tetratelabs/wazero/sys"
 )
 
 // descriptorResource represents an open filesystem descriptor (file or directory).
@@ -212,7 +212,7 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 					return
 				}
 				if offset > 0 {
-					file.Seek(offset, 0)
+					_, _ = file.Seek(offset, 0)
 				}
 
 				streamHandle := h.resources.New(&streamResource{reader: file})
@@ -252,7 +252,7 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 					return
 				}
 				if offset > 0 {
-					file.Seek(offset, 0)
+					_, _ = file.Seek(offset, 0)
 				}
 
 				// Set the writer on the shared stream resource so [stream-write-0]
@@ -390,9 +390,9 @@ func writeNonBlocking(w io.Writer, data []byte, streamHandle uint32, h *Componen
 	if !isConn {
 		return w.Write(data)
 	}
-	conn.SetWriteDeadline(time.Now())
+	_ = conn.SetWriteDeadline(time.Now())
 	n, err := conn.Write(data)
-	conn.SetWriteDeadline(time.Time{})
+	_ = conn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			// Write would block - start background write.
@@ -400,9 +400,9 @@ func writeNonBlocking(w io.Writer, data []byte, streamHandle uint32, h *Componen
 			copy(dataCopy, data)
 			h.pendingOps.Add(1)
 			go func() {
-				conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+				_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 				written, _ := conn.Write(dataCopy)
-				conn.SetWriteDeadline(time.Time{})
+				_ = conn.SetWriteDeadline(time.Time{})
 				h.asyncEvents <- asyncEvent{3, streamHandle, uint32(written << 4)}
 			}()
 			return -1, nil
@@ -440,9 +440,9 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			mem.WriteByte(retPtr, 0)                       // ok
+			mem.WriteByte(retPtr, 0)                           // ok
 			mem.WriteByte(retPtr+4, fileModeToDT(info.Mode())) // descriptor-type disc
-			mem.WriteByte(retPtr+8, 0)                     // option<string> = None
+			mem.WriteByte(retPtr+8, 0)                         // option<string> = None
 			stack[0] = 2
 		})
 
@@ -1079,7 +1079,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 			mem := mod.Memory()
 			if res, ok := h.resources.Get(self); ok {
 				if dr, ok := res.(*descriptorResource); ok && dr.file != nil {
-					dr.file.Sync()
+					_ = dr.file.Sync()
 				}
 			}
 			mem.WriteByte(retPtr, 0)
@@ -1416,9 +1416,9 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				}
 				// Real TCP listener.
 				if tls.listener != nil {
-					tls.listener.SetDeadline(time.Now())
+					_ = tls.listener.SetDeadline(time.Now())
 					conn, err := tls.listener.AcceptTCP()
-					tls.listener.SetDeadline(time.Time{})
+					_ = tls.listener.SetDeadline(time.Time{})
 					if err == nil {
 						accepted := &tcpSocketResource{
 							conn:      conn,
@@ -1438,9 +1438,9 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 					host := tls.host
 					host.pendingOps.Add(1)
 					go func() {
-						listener.SetDeadline(time.Now().Add(30 * time.Second))
+						_ = listener.SetDeadline(time.Now().Add(30 * time.Second))
 						conn, err := listener.AcceptTCP()
-						listener.SetDeadline(time.Time{})
+						_ = listener.SetDeadline(time.Time{})
 						resultCode := uint32(0x1) // DROPPED(0)
 						if err == nil {
 							accepted := &tcpSocketResource{
@@ -1678,10 +1678,10 @@ func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramT
 				}
 				// For network connections, try non-blocking read.
 				if conn, ok := sr.reader.(net.Conn); ok {
-					conn.SetReadDeadline(time.Now())
+					_ = conn.SetReadDeadline(time.Now())
 					buf := make([]byte, bufLen)
 					n, err := conn.Read(buf)
-					conn.SetReadDeadline(time.Time{})
+					_ = conn.SetReadDeadline(time.Time{})
 					if n > 0 {
 						mem.Write(bufPtr, buf[:n])
 						if err != nil {
@@ -1697,10 +1697,10 @@ func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramT
 							streamHandle := handle
 							h.pendingOps.Add(1)
 							go func() {
-								conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+								_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 								readBuf := make([]byte, bufLen)
 								n, readErr := conn.Read(readBuf)
-								conn.SetReadDeadline(time.Time{})
+								_ = conn.SetReadDeadline(time.Time{})
 								resultCode := uint32(n << 4) // COMPLETED(n)
 								if n > 0 {
 									mem.Write(bufPtr, readBuf[:n])
@@ -1762,9 +1762,9 @@ func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramT
 				// Real TCP listener.
 				if tls.listener != nil {
 					// Try non-blocking accept first.
-					tls.listener.SetDeadline(time.Now())
+					_ = tls.listener.SetDeadline(time.Now())
 					conn, err := tls.listener.AcceptTCP()
-					tls.listener.SetDeadline(time.Time{})
+					_ = tls.listener.SetDeadline(time.Time{})
 					if err == nil {
 						accepted := &tcpSocketResource{
 							conn:      conn,
@@ -1785,9 +1785,9 @@ func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramT
 					host := tls.host
 					host.pendingOps.Add(1)
 					go func() {
-						listener.SetDeadline(time.Now().Add(30 * time.Second))
+						_ = listener.SetDeadline(time.Now().Add(30 * time.Second))
 						conn, err := listener.AcceptTCP()
-						listener.SetDeadline(time.Time{})
+						_ = listener.SetDeadline(time.Time{})
 						resultCode := uint32(0x1) // DROPPED(0) on error
 						if err == nil {
 							accepted := &tcpSocketResource{
@@ -1803,7 +1803,7 @@ func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramT
 							resultCode = 0x10 // COMPLETED(1)
 						}
 						host.asyncEvents <- asyncEvent{
-							eventType: 2,           // STREAM_READ
+							eventType: 2,            // STREAM_READ
 							p1:        streamHandle, // stream handle
 							p2:        resultCode,
 						}
@@ -1973,13 +1973,10 @@ func buildDescriptorStat(info os.FileInfo) []byte {
 	binary.LittleEndian.PutUint64(buf[24:], 1) // link-count
 	binary.LittleEndian.PutUint64(buf[32:], uint64(info.Size()))
 
+	st := wzsys.NewStat_t(info)
 	mtime := info.ModTime()
-	atime := mtime // fallback
-	ctime := mtime // fallback
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		atime = time.Unix(st.Atim.Sec, st.Atim.Nsec)
-		ctime = time.Unix(st.Ctim.Sec, st.Ctim.Nsec)
-	}
+	atime := time.Unix(0, st.Atim)
+	ctime := time.Unix(0, st.Ctim)
 	putOptInstant(buf[40:], atime) // data-access-timestamp
 	putOptInstant(buf[64:], mtime) // data-modification-timestamp
 	putOptInstant(buf[88:], ctime) // status-change-timestamp
@@ -2117,29 +2114,8 @@ func mapErrno(err error) byte {
 	if le, ok := err.(*os.LinkError); ok {
 		err = le.Err
 	}
-	switch {
-	case err == syscall.ENOTDIR:
-		return ecNotDirectory
-	case err == syscall.EISDIR:
-		return ecIsDirectory
-	case err == syscall.ENOTEMPTY:
-		return ecNotEmpty
-	case err == syscall.ELOOP:
-		return ecLoop
-	case err == syscall.ENAMETOOLONG:
-		return ecNameTooLong
-	case err == syscall.ENOSPC:
-		return ecNotEnoughSpace
-	case err == syscall.EXDEV:
-		return ecCrossDevice
-	case err == syscall.EROFS:
-		return ecReadOnly
-	case err == syscall.EBUSY:
-		return ecBusy
-	case err == syscall.EINVAL:
-		return ecInvalid
-	case err == syscall.EBADF:
-		return ecBadDescriptor
+	if ec := mapSyscallErrno(err); ec != 0 {
+		return ec
 	}
 	return ecIO
 }

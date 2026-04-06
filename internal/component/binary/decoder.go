@@ -1743,8 +1743,9 @@ func skipComponentTypeDecl(r *bytes.Reader) error {
 
 // skipAlias skips an alias definition within a type declaration.
 // Format: sort target
-//   sort = extern kind byte
-//   target = 0x00 instanceidx name | 0x01 count idx
+//
+//	sort = extern kind byte
+//	target = 0x00 instanceidx name | 0x01 count idx
 func skipAlias(r *bytes.Reader) error {
 	// Read sort: 0x00 <core_sort> or single byte for component sorts.
 	sortByte, err := r.ReadByte()

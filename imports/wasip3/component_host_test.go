@@ -152,6 +152,9 @@ func runFSTest(t *testing.T, name string, preopen string) {
 // copyTestDir creates a temporary copy of the fs-tests.dir for tests that write.
 func copyTestDir(t *testing.T) string {
 	t.Helper()
+	if _, err := os.Lstat(fsTestDir); err != nil {
+		t.Skip("wasi-testsuite not available: ", err)
+	}
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "fs-tests.dir")
 	if err := copyDir(fsTestDir, dest); err != nil {

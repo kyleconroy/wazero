@@ -2,42 +2,43 @@ package wasip2
 
 import (
 	"context"
+
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/internal/wasm"
 )
 
 // wasi:filesystem/types function names.
 const (
-	fsReadViaStreamName         = "read-via-stream"
-	fsWriteViaStreamName        = "write-via-stream"
-	fsAppendViaStreamName       = "append-via-stream"
-	fsAdviseName                = "advise"
-	fsSyncDataName              = "sync-data"
-	fsGetFlagsName              = "get-flags"
-	fsGetTypeName               = "get-type"
-	fsSetSizeName               = "set-size"
-	fsSetTimesName              = "set-times"
-	fsReadName                  = "read"
-	fsWriteName                 = "write"
-	fsReadDirectoryName         = "read-directory"
-	fsSyncName                  = "sync"
-	fsCreateDirectoryAtName     = "create-directory-at"
-	fsStatName                  = "stat"
-	fsStatAtName                = "stat-at"
-	fsSetTimesAtName            = "set-times-at"
-	fsLinkAtName                = "link-at"
-	fsOpenAtName                = "open-at"
-	fsReadlinkAtName            = "readlink-at"
-	fsRemoveDirectoryAtName     = "remove-directory-at"
-	fsRenameAtName              = "rename-at"
-	fsSymlinkAtName             = "symlink-at"
-	fsUnlinkFileAtName          = "unlink-file-at"
-	fsIsSameObjectName          = "is-same-object"
-	fsMetadataHashName          = "metadata-hash"
-	fsMetadataHashAtName        = "metadata-hash-at"
-	fsDropDescriptorName        = "drop-descriptor"
-	fsReadDirectoryEntryName    = "read-directory-entry"
-	fsDropDirectoryEntryStream  = "drop-directory-entry-stream"
+	fsReadViaStreamName        = "read-via-stream"
+	fsWriteViaStreamName       = "write-via-stream"
+	fsAppendViaStreamName      = "append-via-stream"
+	fsAdviseName               = "advise"
+	fsSyncDataName             = "sync-data"
+	fsGetFlagsName             = "get-flags"
+	fsGetTypeName              = "get-type"
+	fsSetSizeName              = "set-size"
+	fsSetTimesName             = "set-times"
+	fsReadName                 = "read"
+	fsWriteName                = "write"
+	fsReadDirectoryName        = "read-directory"
+	fsSyncName                 = "sync"
+	fsCreateDirectoryAtName    = "create-directory-at"
+	fsStatName                 = "stat"
+	fsStatAtName               = "stat-at"
+	fsSetTimesAtName           = "set-times-at"
+	fsLinkAtName               = "link-at"
+	fsOpenAtName               = "open-at"
+	fsReadlinkAtName           = "readlink-at"
+	fsRemoveDirectoryAtName    = "remove-directory-at"
+	fsRenameAtName             = "rename-at"
+	fsSymlinkAtName            = "symlink-at"
+	fsUnlinkFileAtName         = "unlink-file-at"
+	fsIsSameObjectName         = "is-same-object"
+	fsMetadataHashName         = "metadata-hash"
+	fsMetadataHashAtName       = "metadata-hash-at"
+	fsDropDescriptorName       = "drop-descriptor"
+	fsReadDirectoryEntryName   = "read-directory-entry"
+	fsDropDirectoryEntryStream = "drop-directory-entry-stream"
 )
 
 // wasi:filesystem/preopens function names.
@@ -239,4 +240,3 @@ var PreopensGetDirectories = &wasm.HostFunc{
 		stack[1] = 0
 	})},
 }
-

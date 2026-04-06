@@ -33,7 +33,7 @@ type tcpSocketResource struct {
 	family    uint8 // 0=IPv4, 1=IPv6
 	listener  *net.TCPListener
 	conn      *net.TCPConn
-	pipeConn  net.Conn // for simulated IPv6 connections (net.Pipe)
+	pipeConn  net.Conn     // for simulated IPv6 connections (net.Pipe)
 	addr      *net.TCPAddr // bound address
 	connected bool         // true if connect succeeded (even simulated)
 	listening bool         // true if listen was called
@@ -50,16 +50,11 @@ type udpSocketResource struct {
 	remoteAddr *net.UDPAddr
 }
 
-// tcpConnectionResource wraps an accepted TCP connection.
-type tcpConnectionResource struct {
-	conn *net.TCPConn
-}
-
 // tcpListenerStream wraps a TCP listener as a stream resource for accepting connections.
 type tcpListenerStream struct {
 	listener    *net.TCPListener
 	acceptCh    chan net.Conn // for simulated (IPv6) listeners
-	pendingConn net.Conn     // cached connection from background accept
+	pendingConn net.Conn      // cached connection from background accept
 	host        *ComponentHost
 }
 
@@ -141,12 +136,13 @@ func (h *ComponentHost) registerSockets(cl *wazero.ComponentLinker) {}
 
 // writeUDPReceiveResult writes a successful receive result to retPtr.
 // Result layout: result<tuple<list<u8>, ip-socket-address>, error-code>
-//   +0:  disc=0 (ok)
-//   +4:  list ptr (u32) - allocated via cabi_realloc
-//   +8:  list len (u32)
-//   +12: ip-socket-address disc (u8) - 0=IPv4, 1=IPv6
-//   For IPv4: +16: port(u16), +18: a,b,c,d
-//   For IPv6: +16: port(u16), +20: flow-info(u32), +24: addr(u16×8), +40: scope-id(u32)
+//
+//	+0:  disc=0 (ok)
+//	+4:  list ptr (u32) - allocated via cabi_realloc
+//	+8:  list len (u32)
+//	+12: ip-socket-address disc (u8) - 0=IPv4, 1=IPv6
+//	For IPv4: +16: port(u16), +18: a,b,c,d
+//	For IPv6: +16: port(u16), +20: flow-info(u32), +24: addr(u16×8), +40: scope-id(u32)
 func writeUDPReceiveResult(ctx context.Context, mod api.Module, retPtr uint32, data []byte, addr *net.UDPAddr) {
 	mem := mod.Memory()
 	if mem == nil {
@@ -364,7 +360,7 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 
 			if !connected || alreadySending {
 				// Write Err(invalid-state) to retPtr.
-				mem.WriteByte(retPtr, 1)   // err discriminant
+				mem.WriteByte(retPtr, 1) // err discriminant
 				mem.WriteByte(retPtr+4, errInvalidState)
 				stack[0] = 2 // RETURNED
 				return
@@ -475,7 +471,6 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 			}
 			sock := res.(*udpSocketResource)
 			sock.mu.Lock()
-			conn := sock.conn
 			remoteAddr := sock.remoteAddr
 			family := sock.family
 			sock.mu.Unlock()
@@ -592,7 +587,7 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 					sock.addr = &net.UDPAddr{IP: net.IPv6loopback, Port: 0}
 				}
 			}
-			conn = sock.conn
+			conn := sock.conn
 			sock.mu.Unlock()
 
 			// Send the data.
@@ -600,9 +595,9 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 			if len(data) > 0 {
 				if conn != nil {
 					if remoteAddr != nil {
-						conn.Write(data)
+						_, _ = conn.Write(data)
 					} else {
-						conn.WriteToUDP(data, targetAddr)
+						_, _ = conn.WriteToUDP(data, targetAddr)
 					}
 				} else if targetAddr != nil {
 					// Simulated (IPv6) socket: deliver to mailbox.
@@ -709,9 +704,9 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 
 			// Try non-blocking read first.
 			buf := make([]byte, 65536)
-			conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+			_ = conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 			n, senderAddr, err := conn.ReadFromUDP(buf)
-			conn.SetReadDeadline(time.Time{})
+			_ = conn.SetReadDeadline(time.Time{})
 
 			if err == nil {
 				// Data available - write result synchronously.
@@ -726,9 +721,9 @@ func (h *ComponentHost) asyncLowerSockets(inner string, paramTypes, resultTypes 
 
 			go func() {
 				readBuf := make([]byte, 65536)
-				conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 				n, addr, err := conn.ReadFromUDP(readBuf)
-				conn.SetReadDeadline(time.Time{})
+				_ = conn.SetReadDeadline(time.Time{})
 
 				if err != nil {
 					// Error - return err result.
@@ -1233,6 +1228,23 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 			if addrDisc != 0 {
 				network = "udp6"
 			}
+
+			// Check for duplicate binds. Go's net.ListenUDP sets
+			// SO_REUSEADDR which allows duplicate binds on Linux,
+			// but WASI requires AddressInUse for duplicates.
+			if port != 0 {
+				prefix := "udp"
+				if addrDisc != 0 {
+					prefix = "udp6"
+				}
+				addrKey := fmt.Sprintf("%s[%s]:%d", prefix, ip, port)
+				if _, loaded := boundAddresses.LoadOrStore(addrKey, true); loaded {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errAddressInUse)
+					return
+				}
+			}
+
 			conn, err := net.ListenUDP(network, udpAddr)
 			if err != nil {
 				// IPv6 simulation.
@@ -1240,7 +1252,7 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 					if port == 0 {
 						port = 22345 + uint16(udpBindCount)
 					}
-					addrKey := fmt.Sprintf("udp[%s]:%d", ip, port)
+					addrKey := fmt.Sprintf("udp6[%s]:%d", ip, port)
 					if _, loaded := boundAddresses.LoadOrStore(addrKey, true); loaded {
 						mem.WriteByte(retPtr, 1)
 						mem.WriteByte(retPtr+4, errAddressInUse)
@@ -1259,6 +1271,16 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 			}
 			sock.conn = conn
 			sock.addr = conn.LocalAddr().(*net.UDPAddr)
+			// Track ephemeral port binds for duplicate detection.
+			if port == 0 {
+				actualPort := sock.addr.Port
+				prefix := "udp"
+				if addrDisc != 0 {
+					prefix = "udp6"
+				}
+				addrKey := fmt.Sprintf("%s[%s]:%d", prefix, sock.addr.IP, actualPort)
+				boundAddresses.Store(addrKey, true)
+			}
 			mem.WriteByte(retPtr, 0) // ok
 		})
 

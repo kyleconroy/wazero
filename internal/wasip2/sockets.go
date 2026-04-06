@@ -9,27 +9,27 @@ import (
 
 // wasi:sockets function names.
 const (
-	sockTCPStartBindName    = "start-bind"
-	sockTCPFinishBindName   = "finish-bind"
-	sockTCPStartConnectName = "start-connect"
+	sockTCPStartBindName     = "start-bind"
+	sockTCPFinishBindName    = "finish-bind"
+	sockTCPStartConnectName  = "start-connect"
 	sockTCPFinishConnectName = "finish-connect"
-	sockTCPStartListenName  = "start-listen"
-	sockTCPFinishListenName = "finish-listen"
-	sockTCPAcceptName       = "accept"
-	sockTCPLocalAddressName = "local-address"
+	sockTCPStartListenName   = "start-listen"
+	sockTCPFinishListenName  = "finish-listen"
+	sockTCPAcceptName        = "accept"
+	sockTCPLocalAddressName  = "local-address"
 	sockTCPRemoteAddressName = "remote-address"
-	sockTCPShutdownName     = "shutdown"
-	sockTCPSetKeepAliveName = "set-keep-alive-enabled"
-	sockTCPDropName         = "drop-tcp-socket"
+	sockTCPShutdownName      = "shutdown"
+	sockTCPSetKeepAliveName  = "set-keep-alive-enabled"
+	sockTCPDropName          = "drop-tcp-socket"
 
-	sockTCPCreateSocketName     = "create-tcp-socket"
-	sockUDPCreateSocketName     = "create-udp-socket"
-	sockInstanceNetworkName     = "instance-network"
-	sockNetworkDropName         = "drop-network"
+	sockTCPCreateSocketName = "create-tcp-socket"
+	sockUDPCreateSocketName = "create-udp-socket"
+	sockInstanceNetworkName = "instance-network"
+	sockNetworkDropName     = "drop-network"
 
-	sockIPNameLookupName        = "resolve-addresses"
-	sockIPNameLookupNextName    = "resolve-next-address"
-	sockIPNameLookupDropName    = "drop-resolve-address-stream"
+	sockIPNameLookupName     = "resolve-addresses"
+	sockIPNameLookupNextName = "resolve-next-address"
+	sockIPNameLookupDropName = "drop-resolve-address-stream"
 )
 
 // SocketsTCPStartBind implements wasi:sockets/tcp.tcp-socket.start-bind.
