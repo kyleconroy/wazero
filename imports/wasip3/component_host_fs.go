@@ -11,11 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	wzsys "github.com/tetratelabs/wazero/sys"
 )
 
 // descriptorResource represents an open filesystem descriptor (file or directory).
@@ -1973,13 +1973,10 @@ func buildDescriptorStat(info os.FileInfo) []byte {
 	binary.LittleEndian.PutUint64(buf[24:], 1) // link-count
 	binary.LittleEndian.PutUint64(buf[32:], uint64(info.Size()))
 
+	st := wzsys.NewStat_t(info)
 	mtime := info.ModTime()
-	atime := mtime // fallback
-	ctime := mtime // fallback
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		atime = time.Unix(st.Atim.Sec, st.Atim.Nsec)
-		ctime = time.Unix(st.Ctim.Sec, st.Ctim.Nsec)
-	}
+	atime := time.Unix(0, st.Atim)
+	ctime := time.Unix(0, st.Ctim)
 	putOptInstant(buf[40:], atime) // data-access-timestamp
 	putOptInstant(buf[64:], mtime) // data-modification-timestamp
 	putOptInstant(buf[88:], ctime) // status-change-timestamp
@@ -2117,29 +2114,8 @@ func mapErrno(err error) byte {
 	if le, ok := err.(*os.LinkError); ok {
 		err = le.Err
 	}
-	switch {
-	case err == syscall.ENOTDIR:
-		return ecNotDirectory
-	case err == syscall.EISDIR:
-		return ecIsDirectory
-	case err == syscall.ENOTEMPTY:
-		return ecNotEmpty
-	case err == syscall.ELOOP:
-		return ecLoop
-	case err == syscall.ENAMETOOLONG:
-		return ecNameTooLong
-	case err == syscall.ENOSPC:
-		return ecNotEnoughSpace
-	case err == syscall.EXDEV:
-		return ecCrossDevice
-	case err == syscall.EROFS:
-		return ecReadOnly
-	case err == syscall.EBUSY:
-		return ecBusy
-	case err == syscall.EINVAL:
-		return ecInvalid
-	case err == syscall.EBADF:
-		return ecBadDescriptor
+	if ec := mapSyscallErrno(err); ec != 0 {
+		return ec
 	}
 	return ecIO
 }
