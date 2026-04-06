@@ -1227,6 +1227,23 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 			if addrDisc != 0 {
 				network = "udp6"
 			}
+
+			// Check for duplicate binds. Go's net.ListenUDP sets
+			// SO_REUSEADDR which allows duplicate binds on Linux,
+			// but WASI requires AddressInUse for duplicates.
+			if port != 0 {
+				prefix := "udp"
+				if addrDisc != 0 {
+					prefix = "udp6"
+				}
+				addrKey := fmt.Sprintf("%s[%s]:%d", prefix, ip, port)
+				if _, loaded := boundAddresses.LoadOrStore(addrKey, true); loaded {
+					mem.WriteByte(retPtr, 1)
+					mem.WriteByte(retPtr+4, errAddressInUse)
+					return
+				}
+			}
+
 			conn, err := net.ListenUDP(network, udpAddr)
 			if err != nil {
 				// IPv6 simulation.
@@ -1234,7 +1251,7 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 					if port == 0 {
 						port = 22345 + uint16(udpBindCount)
 					}
-					addrKey := fmt.Sprintf("udp[%s]:%d", ip, port)
+					addrKey := fmt.Sprintf("udp6[%s]:%d", ip, port)
 					if _, loaded := boundAddresses.LoadOrStore(addrKey, true); loaded {
 						mem.WriteByte(retPtr, 1)
 						mem.WriteByte(retPtr+4, errAddressInUse)
@@ -1253,6 +1270,16 @@ func (h *ComponentHost) socketsImportHandler(moduleName, funcName string, paramT
 			}
 			sock.conn = conn
 			sock.addr = conn.LocalAddr().(*net.UDPAddr)
+			// Track ephemeral port binds for duplicate detection.
+			if port == 0 {
+				actualPort := sock.addr.Port
+				prefix := "udp"
+				if addrDisc != 0 {
+					prefix = "udp6"
+				}
+				addrKey := fmt.Sprintf("%s[%s]:%d", prefix, sock.addr.IP, actualPort)
+				boundAddresses.Store(addrKey, true)
+			}
 			mem.WriteByte(retPtr, 0) // ok
 		})
 
