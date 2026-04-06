@@ -1483,7 +1483,9 @@ func pathFilestatSetTimesFn(_ context.Context, mod api.Module, params []uint64) 
 		Lutimens(path string, atim, mtim int64) experimentalsys.Errno
 	}
 	if lfs, ok := preopen.(lutimensFS); ok {
-		return lfs.Lutimens(pathName, atim, mtim)
+		if errno := lfs.Lutimens(pathName, atim, mtim); errno != experimentalsys.ENOSYS {
+			return errno
+		}
 	}
 	// Fall back to opening the file (which follows symlinks).
 	if f, errno := preopen.OpenFile(pathName, experimentalsys.O_WRONLY, 0); errno != 0 {
