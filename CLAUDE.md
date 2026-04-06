@@ -10,6 +10,14 @@ wazero is a zero-dependency WebAssembly runtime for Go, with support for WASI Pr
 go build ./...
 ```
 
+## Pre-flight Checks
+
+Before submitting a pull request, run the full pre-flight check:
+```bash
+make check
+```
+This cross-compiles for all supported platforms (plan9, js/wasm, wasip1, aix, s390x, etc.) and runs the linter.
+
 ## Running Tests
 
 ### All tests
