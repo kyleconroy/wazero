@@ -202,6 +202,14 @@ func (cl *ComponentLinker) InstantiateComponent(
 // For P3 async components, this uses the [async-lift] entry + callback loop.
 // For P2 components, this calls wasi:cli/run@0.2.0#run.
 func (cl *ComponentLinker) runComponentEntry(ctx context.Context, mod api.Module) error {
+	// Check if this is a non-CLI component (e.g., HTTP handler).
+	// Such components don't have a run entry point and should not be auto-started.
+	for name := range mod.ExportedFunctionDefinitions() {
+		if strings.Contains(name, "wasi:http/handler@") && strings.Contains(name, "#handle") {
+			return nil // HTTP handler component - caller invokes handler directly
+		}
+	}
+
 	// Try P3 async entry first. Search for exports matching the async-lift pattern
 	// since the version date may vary across toolchain versions.
 	var asyncRun, callback api.Function
@@ -256,7 +264,7 @@ func (cl *ComponentLinker) runAsyncEntry(ctx context.Context, mod api.Module, as
 	iter := 0
 	for code != callbackExit {
 		iter++
-		if iter > 100 {
+		if iter > 10000 {
 			break
 		}
 		if cl.preCallbackHook != nil {

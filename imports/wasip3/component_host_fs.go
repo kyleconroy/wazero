@@ -1,10 +1,13 @@
 package wasip3
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -365,29 +368,47 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 		}
 	}
 
-	// Set up the import handler for [async-lower] and stream/future variants.
-	cl.SetImportHandler(h.filesystemImportHandler)
+	// Note: the generic import handler is set in RegisterAll, not here.
 }
 
 // filesystemImportHandler handles unregistered filesystem imports, particularly
 // [async-lower] variants that have different signatures from the base methods.
 func (h *ComponentHost) filesystemImportHandler(moduleName, funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
-	if !strings.Contains(moduleName, "filesystem") {
-		return nil
-	}
-
 	// Handle [async-lower] variants.
 	if strings.HasPrefix(funcName, "[async-lower]") {
 		inner := funcName[len("[async-lower]"):]
 		return h.asyncLowerFS(inner, paramTypes, resultTypes)
 	}
 
-	// Handle stream/future plumbing as no-ops.
-	if strings.HasPrefix(funcName, "[stream-") || strings.HasPrefix(funcName, "[future-") {
-		return h.streamFuturePlumbing(funcName, paramTypes, resultTypes)
-	}
-
 	return nil
+}
+
+// writeNonBlocking writes data to a writer, handling net.Conn non-blockingly.
+// Returns n=-1 if the write would block (caller should return BLOCKED).
+func writeNonBlocking(w io.Writer, data []byte, streamHandle uint32, h *ComponentHost) (int, error) {
+	conn, isConn := w.(net.Conn)
+	if !isConn {
+		return w.Write(data)
+	}
+	conn.SetWriteDeadline(time.Now())
+	n, err := conn.Write(data)
+	conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			// Write would block - start background write.
+			dataCopy := make([]byte, len(data))
+			copy(dataCopy, data)
+			h.pendingOps.Add(1)
+			go func() {
+				conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+				written, _ := conn.Write(dataCopy)
+				conn.SetWriteDeadline(time.Time{})
+				h.asyncEvents <- asyncEvent{3, streamHandle, uint32(written << 4)}
+			}()
+			return -1, nil
+		}
+	}
+	return n, err
 }
 
 // asyncLowerFS implements [async-lower] filesystem methods.
@@ -1365,6 +1386,117 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 
+			// Handle TCP listener accept stream (from listen).
+			// stream<tcp-socket>: each item is a 4-byte resource handle.
+			if tls, ok := res.(*tcpListenerStream); ok {
+				if bufLen == 0 {
+					stack[0] = 0
+					return
+				}
+				// Check for cached connection from background accept.
+				if tls.pendingConn != nil {
+					conn := tls.pendingConn
+					tls.pendingConn = nil
+					accepted := &tcpSocketResource{connected: true}
+					if tcpConn, ok := conn.(*net.TCPConn); ok {
+						accepted.conn = tcpConn
+						accepted.addr = tcpConn.LocalAddr().(*net.TCPAddr)
+						if tcpConn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil {
+							accepted.family = 1
+						}
+					} else {
+						accepted.pipeConn = conn
+						accepted.family = 1
+						accepted.addr = &net.TCPAddr{IP: net.ParseIP("::1"), Port: 0}
+					}
+					acceptHandle := tls.host.resources.New(accepted)
+					mem.WriteUint32Le(bufPtr, acceptHandle)
+					stack[0] = (1 << 4) // COMPLETED(1)
+					return
+				}
+				// Real TCP listener.
+				if tls.listener != nil {
+					tls.listener.SetDeadline(time.Now())
+					conn, err := tls.listener.AcceptTCP()
+					tls.listener.SetDeadline(time.Time{})
+					if err == nil {
+						accepted := &tcpSocketResource{
+							conn:      conn,
+							connected: true,
+							addr:      conn.LocalAddr().(*net.TCPAddr),
+						}
+						if conn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil {
+							accepted.family = 1
+						}
+						acceptHandle := tls.host.resources.New(accepted)
+						mem.WriteUint32Le(bufPtr, acceptHandle)
+						stack[0] = (1 << 4)
+						return
+					}
+					listener := tls.listener
+					streamHandle := handle
+					host := tls.host
+					host.pendingOps.Add(1)
+					go func() {
+						listener.SetDeadline(time.Now().Add(30 * time.Second))
+						conn, err := listener.AcceptTCP()
+						listener.SetDeadline(time.Time{})
+						resultCode := uint32(0x1) // DROPPED(0)
+						if err == nil {
+							accepted := &tcpSocketResource{
+								conn:      conn,
+								connected: true,
+								addr:      conn.LocalAddr().(*net.TCPAddr),
+							}
+							if conn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil {
+								accepted.family = 1
+							}
+							acceptHandle := host.resources.New(accepted)
+							mem.WriteUint32Le(bufPtr, acceptHandle)
+							resultCode = 0x10 // COMPLETED(1)
+						}
+						host.asyncEvents <- asyncEvent{2, streamHandle, resultCode}
+					}()
+					stack[0] = 0xFFFFFFFF
+					return
+				}
+				// Simulated IPv6 listener.
+				if tls.acceptCh != nil {
+					select {
+					case conn := <-tls.acceptCh:
+						accepted := &tcpSocketResource{
+							family: 1, pipeConn: conn, connected: true,
+							addr: &net.TCPAddr{IP: net.ParseIP("::1"), Port: 0},
+						}
+						acceptHandle := tls.host.resources.New(accepted)
+						mem.WriteUint32Le(bufPtr, acceptHandle)
+						stack[0] = (1 << 4)
+						return
+					default:
+						ch := tls.acceptCh
+						streamHandle := handle
+						host := tls.host
+						host.pendingOps.Add(1)
+						go func() {
+							conn := <-ch
+							accepted := &tcpSocketResource{
+								family:    1,
+								pipeConn:  conn,
+								connected: true,
+								addr:      &net.TCPAddr{IP: net.ParseIP("::1"), Port: 0},
+							}
+							acceptHandle := host.resources.New(accepted)
+							mem.WriteUint32Le(bufPtr, acceptHandle)
+							host.asyncEvents <- asyncEvent{2, streamHandle, 0x10}
+						}()
+						stack[0] = 0xFFFFFFFF
+						return
+					}
+				}
+				stack[0] = 0x1
+				return
+			}
+
 			stack[0] = 0x1 // DROPPED(0)
 		})
 	}
@@ -1397,7 +1529,11 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 0x1 // DROPPED(0)
 				return
 			}
-			n, err := sr.writer.Write(data)
+			n, err := writeNonBlocking(sr.writer, data, handle, h)
+			if n == -1 {
+				stack[0] = 0xFFFFFFFF // BLOCKED
+				return
+			}
 			if err != nil {
 				stack[0] = uint64(n<<4) | 0x1 // DROPPED(n)
 			} else {
@@ -1449,11 +1585,16 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 }
 
 // streamFuturePlumbing handles [stream-*] and [future-*] function imports.
-func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
+func (h *ComponentHost) streamFuturePlumbing(moduleName, funcName string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
 	if strings.HasPrefix(funcName, "[stream-new-0]") {
 		// () -> i64: return a new stream pair (readable | writable << 32)
+		// Always create a generic in-process stream. The actual I/O connection
+		// (stdin reader, stdout/stderr writer) is set up by the higher-level
+		// functions (read-via-stream, write-via-stream) when they receive
+		// the stream handle.
 		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			shared := &streamResource{}
+			buf := new(bytes.Buffer)
+			shared := &streamResource{reader: buf, writer: buf}
 			readHandle := h.resources.New(shared)
 			writeHandle := h.resources.New(shared)
 			stack[0] = uint64(readHandle) | (uint64(writeHandle) << 32)
@@ -1461,11 +1602,22 @@ func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, result
 	}
 
 	if strings.HasPrefix(funcName, "[future-new-1]") {
+		suffix := funcName[len("[future-new-1]"):]
 		// () -> i64: return a new future pair (readable | writable << 32)
 		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
-			shared := &futureResource{}
+			var shared *futureResource
+			if suffix == "read-via-stream" || suffix == "write-via-stream" {
+				// For CLI stdin/stdout/stderr: pre-ready with Ok result.
+				shared = &futureResource{
+					result: make([]byte, 20), // result<_, error-code>: disc=0 (Ok)
+					ready:  true,
+				}
+			} else {
+				shared = &futureResource{}
+			}
 			readHandle := h.resources.New(shared)
 			writeHandle := h.resources.New(shared)
+
 			stack[0] = uint64(readHandle) | (uint64(writeHandle) << 32)
 		})
 	}
@@ -1479,6 +1631,321 @@ func (h *ComponentHost) streamFuturePlumbing(funcName string, paramTypes, result
 	if strings.HasPrefix(funcName, "[stream-cancel-") || strings.HasPrefix(funcName, "[future-cancel-") {
 		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			stack[0] = 0 // no items consumed/produced
+		})
+	}
+
+	// Handle [stream-read-0]: guest reads from a readable stream.
+	// Signature: (stream_handle: i32, buf_ptr: i32, buf_len: i32) -> i32
+	// Return codes: COMPLETED(n)=(n<<4)|0, DROPPED(n)=(n<<4)|1, CANCELLED(n)=(n<<4)|2, BLOCKED=0xFFFFFFFF
+	if strings.HasPrefix(funcName, "[stream-read-0]") {
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			handle := uint32(stack[0])
+			bufPtr := uint32(stack[1])
+			bufLen := uint32(stack[2])
+			mem := mod.Memory()
+
+			res, ok := h.resources.Get(handle)
+			if !ok {
+
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			if sr, ok := res.(*streamResource); ok {
+				if sr.reader == nil {
+					stack[0] = 0x1 // DROPPED(0)
+					return
+				}
+				if bufLen == 0 {
+					stack[0] = 0 // COMPLETED(0)
+					return
+				}
+				// Check for cached data from a background read.
+				if sr.pendingData != nil {
+					data := sr.pendingData
+					sr.pendingData = nil
+					n := len(data)
+					if uint32(n) > bufLen {
+						n = int(bufLen)
+						sr.pendingData = data[n:]
+					}
+					mem.Write(bufPtr, data[:n])
+					if sr.pendingEOF && sr.pendingData == nil {
+						stack[0] = uint64(n<<4) | 0x1 // DROPPED(n)
+					} else {
+						stack[0] = uint64(n << 4) // COMPLETED(n)
+					}
+					return
+				}
+				// For network connections, try non-blocking read.
+				if conn, ok := sr.reader.(net.Conn); ok {
+					conn.SetReadDeadline(time.Now())
+					buf := make([]byte, bufLen)
+					n, err := conn.Read(buf)
+					conn.SetReadDeadline(time.Time{})
+					if n > 0 {
+						mem.Write(bufPtr, buf[:n])
+						if err != nil {
+							stack[0] = uint64(n<<4) | 0x1
+						} else {
+							stack[0] = uint64(n << 4)
+						}
+						return
+					}
+					if err != nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							// No data available - start background read.
+							streamHandle := handle
+							h.pendingOps.Add(1)
+							go func() {
+								conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+								readBuf := make([]byte, bufLen)
+								n, readErr := conn.Read(readBuf)
+								conn.SetReadDeadline(time.Time{})
+								resultCode := uint32(n << 4) // COMPLETED(n)
+								if n > 0 {
+									mem.Write(bufPtr, readBuf[:n])
+								}
+								if readErr != nil {
+									resultCode = uint32(n<<4) | 0x1 // DROPPED(n)
+								}
+								h.asyncEvents <- asyncEvent{2, streamHandle, resultCode}
+							}()
+							stack[0] = 0xFFFFFFFF // BLOCKED
+							return
+						}
+						stack[0] = 0x1 // DROPPED(0)
+						return
+					}
+				}
+				buf := make([]byte, bufLen)
+				n, err := sr.reader.Read(buf)
+				if n > 0 {
+					mem.Write(bufPtr, buf[:n])
+				}
+				if err != nil {
+					stack[0] = uint64(n<<4) | 0x1 // DROPPED(n)
+				} else {
+					stack[0] = uint64(n << 4) // COMPLETED(n)
+				}
+				return
+			}
+			// TCP listener accept stream.
+			if tls, ok := res.(*tcpListenerStream); ok {
+				if bufLen == 0 {
+					stack[0] = 0
+					return
+				}
+				// Check for a cached connection from a previous background accept.
+				if tls.pendingConn != nil {
+					conn := tls.pendingConn
+					tls.pendingConn = nil
+					accepted := &tcpSocketResource{
+						connected: true,
+					}
+					if tcpConn, ok := conn.(*net.TCPConn); ok {
+						accepted.conn = tcpConn
+						accepted.addr = tcpConn.LocalAddr().(*net.TCPAddr)
+						if tcpConn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil {
+							accepted.family = 1
+						}
+					} else {
+						// net.Pipe or similar
+						accepted.pipeConn = conn
+						accepted.family = 1
+						accepted.addr = &net.TCPAddr{IP: net.ParseIP("::1"), Port: 0}
+					}
+					acceptHandle := tls.host.resources.New(accepted)
+					mem.WriteUint32Le(bufPtr, acceptHandle)
+					stack[0] = (1 << 4) // COMPLETED(1)
+					return
+				}
+				// Real TCP listener.
+				if tls.listener != nil {
+					// Try non-blocking accept first.
+					tls.listener.SetDeadline(time.Now())
+					conn, err := tls.listener.AcceptTCP()
+					tls.listener.SetDeadline(time.Time{})
+					if err == nil {
+						accepted := &tcpSocketResource{
+							conn:      conn,
+							connected: true,
+							addr:      conn.LocalAddr().(*net.TCPAddr),
+						}
+						if conn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil {
+							accepted.family = 1
+						}
+						acceptHandle := tls.host.resources.New(accepted)
+						mem.WriteUint32Le(bufPtr, acceptHandle)
+						stack[0] = (1 << 4) // COMPLETED(1)
+						return
+					}
+					// No connection available - start background accept.
+					listener := tls.listener
+					streamHandle := handle
+					host := tls.host
+					host.pendingOps.Add(1)
+					go func() {
+						listener.SetDeadline(time.Now().Add(30 * time.Second))
+						conn, err := listener.AcceptTCP()
+						listener.SetDeadline(time.Time{})
+						resultCode := uint32(0x1) // DROPPED(0) on error
+						if err == nil {
+							accepted := &tcpSocketResource{
+								conn:      conn,
+								connected: true,
+								addr:      conn.LocalAddr().(*net.TCPAddr),
+							}
+							if conn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil {
+								accepted.family = 1
+							}
+							acceptHandle := host.resources.New(accepted)
+							mem.WriteUint32Le(bufPtr, acceptHandle)
+							resultCode = 0x10 // COMPLETED(1)
+						}
+						host.asyncEvents <- asyncEvent{
+							eventType: 2,           // STREAM_READ
+							p1:        streamHandle, // stream handle
+							p2:        resultCode,
+						}
+					}()
+					stack[0] = 0xFFFFFFFF // BLOCKED
+					return
+				}
+				// Simulated IPv6 listener - check accept channel.
+				if tls.acceptCh != nil {
+					select {
+					case conn := <-tls.acceptCh:
+						accepted := &tcpSocketResource{
+							family:    1,
+							pipeConn:  conn,
+							connected: true,
+							addr:      &net.TCPAddr{IP: net.ParseIP("::1"), Port: 0},
+						}
+						acceptHandle := tls.host.resources.New(accepted)
+						mem.WriteUint32Le(bufPtr, acceptHandle)
+						stack[0] = (1 << 4) // COMPLETED(1)
+						return
+					default:
+						// Start background accept for simulated listener.
+						ch := tls.acceptCh
+						streamHandle := handle
+						host := tls.host
+						host.pendingOps.Add(1)
+						go func() {
+							conn := <-ch
+							accepted := &tcpSocketResource{
+								family:    1,
+								pipeConn:  conn,
+								connected: true,
+								addr:      &net.TCPAddr{IP: net.ParseIP("::1"), Port: 0},
+							}
+							acceptHandle := host.resources.New(accepted)
+							mem.WriteUint32Le(bufPtr, acceptHandle)
+							host.asyncEvents <- asyncEvent{
+								eventType: 2,
+								p1:        streamHandle,
+								p2:        0x10,
+							}
+						}()
+						stack[0] = 0xFFFFFFFF // BLOCKED
+						return
+					}
+				}
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			stack[0] = 0x1 // DROPPED(0)
+		})
+	}
+
+	// Handle [stream-write-0]: guest writes data to a writable stream.
+	// Signature: (stream_handle: i32, buf_ptr: i32, buf_len: i32) -> i32
+	if strings.HasPrefix(funcName, "[stream-write-0]") {
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			handle := uint32(stack[0])
+			bufPtr := uint32(stack[1])
+			bufLen := uint32(stack[2])
+			mem := mod.Memory()
+
+			res, ok := h.resources.Get(handle)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			sr, ok := res.(*streamResource)
+			if !ok || sr.writer == nil {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			if bufLen == 0 {
+				stack[0] = 0 // COMPLETED(0)
+				return
+			}
+			data, ok := mem.Read(bufPtr, bufLen)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			n, err := writeNonBlocking(sr.writer, data, handle, h)
+			if n == -1 {
+				stack[0] = 0xFFFFFFFF // BLOCKED
+				return
+			}
+			if err != nil {
+				stack[0] = uint64(n<<4) | 0x1 // DROPPED(n)
+			} else {
+				stack[0] = uint64(n << 4) // COMPLETED(n)
+			}
+		})
+	}
+
+	// Handle [future-read-1]: guest reads a future value.
+	// Signature: (future_handle: i32, ret_ptr: i32) -> i32
+	if strings.HasPrefix(funcName, "[future-read-1]") || strings.HasPrefix(funcName, "[future-read-2]") {
+		suffix := funcName[len("[future-read-"):]
+		if idx := strings.Index(suffix, "]"); idx >= 0 {
+			suffix = suffix[idx+1:]
+		}
+		return api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			handle := uint32(stack[0])
+			retPtr := uint32(stack[1])
+			mem := mod.Memory()
+
+			res, ok := h.resources.Get(handle)
+			if !ok {
+				// For CLI stream functions (read-via-stream, write-via-stream),
+				// the guest may not call [future-new-1] and manages future handles
+				// internally. The future just means "operation completed OK".
+				if suffix == "read-via-stream" || suffix == "write-via-stream" {
+					// Write result<_, error-code> Ok discriminant at retPtr
+					okResult := make([]byte, 20)
+					mem.Write(retPtr, okResult)
+					stack[0] = 0 // COMPLETED(0)
+					return
+				}
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			fr, ok := res.(*futureResource)
+			if !ok {
+				stack[0] = 0x1 // DROPPED(0)
+				return
+			}
+			if !fr.ready {
+				stack[0] = 0xFFFFFFFF // BLOCKED
+				return
+			}
+			if fr.result != nil {
+				mem.Write(retPtr, fr.result)
+			}
+			stack[0] = 0 // COMPLETED(0)
+		})
+	}
+
+	// Handle [future-write-1] / [future-write-2]: host writes a future value.
+	if strings.HasPrefix(funcName, "[future-write-1]") || strings.HasPrefix(funcName, "[future-write-2]") {
+		return api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			stack[0] = 0 // COMPLETED(0)
 		})
 	}
 

@@ -1,6 +1,7 @@
 package wasip3
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -241,9 +242,31 @@ func TestFilesystemDotdot(t *testing.T) {
 }
 
 func TestCliStdioRoundtrip(t *testing.T) {
-	_, err := instantiateP3(t, "cli-stdio-roundtrip.wasm", []string{"cli-stdio-roundtrip"}, nil)
+	data, err := os.ReadFile(wasmDir + "/cli-stdio-roundtrip.wasm")
+	if err != nil {
+		t.Skip("cli-stdio-roundtrip.wasm not found")
+	}
+
+	ctx := context.Background()
+	rt := wazero.NewRuntime(ctx)
+	t.Cleanup(func() { rt.Close(ctx) })
+
+	stdin := bytes.NewReader([]byte("Hello, world!"))
+	var stdout, stderr bytes.Buffer
+	host := NewComponentHost(stdin, &stdout, &stderr, []string{"cli-stdio-roundtrip"}, nil)
+	mod, err := InstantiateComponentWithHost(ctx, rt, data,
+		wazero.NewModuleConfig().WithName("").WithStartFunctions(), host)
+	if mod != nil {
+		t.Cleanup(func() { mod.Close(ctx) })
+	}
 	if err != nil {
 		t.Errorf("cli-stdio-roundtrip failed: %v", err)
+	}
+	if got := stdout.String(); got != "Hello, world!" {
+		t.Errorf("stdout: got %q, want %q", got, "Hello, world!")
+	}
+	if got := stderr.String(); got != "Hello, world!" {
+		t.Errorf("stderr: got %q, want %q", got, "Hello, world!")
 	}
 }
 
