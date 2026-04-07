@@ -828,6 +828,17 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			h.resources.Drop(uint32(stack[0]))
 		}))
 
+	// [method]error.to-debug-string: (self) -> (retPtr)
+	// Writes a string (ptr, len) at retPtr describing the error.
+	cl.DefineFunc("wasi:io/error@0.2.0", "[method]error.to-debug-string",
+		[]api.ValueType{i32, i32}, nil,
+		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			// self := uint32(stack[0])
+			retPtr := uint32(stack[1])
+			// Return an empty debug string.
+			_ = writeListToMemory(ctx, mod, retPtr, nil)
+		}))
+
 	// wasi:io/poll@0.2.0
 	cl.DefineFunc("wasi:io/poll@0.2.0", "[resource-drop]pollable",
 		[]api.ValueType{i32}, nil,
@@ -835,10 +846,63 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			h.resources.Drop(uint32(stack[0]))
 		}))
 
+	// [method]pollable.ready: (self) -> bool
+	cl.DefineFunc("wasi:io/poll@0.2.0", "[method]pollable.ready",
+		[]api.ValueType{i32}, []api.ValueType{i32},
+		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			handle := uint32(stack[0])
+			res, ok := h.resources.Get(handle)
+			if ok {
+				if pr, ok := res.(*pollableResource); ok && pr.ready {
+					stack[0] = 1
+					return
+				}
+			}
+			stack[0] = 1 // default to ready
+		}))
+
+	// [method]pollable.block: (self) -> ()
 	cl.DefineFunc("wasi:io/poll@0.2.0", "[method]pollable.block",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			// Block until ready - for now just return immediately.
+		}))
+
+	// poll: (list<borrow<pollable>>) -> list<u32>
+	// Takes (ptr, len) of pollable handles, returns (ptr, len) of ready indices.
+	cl.DefineFunc("wasi:io/poll@0.2.0", "poll",
+		[]api.ValueType{i32, i32, i32}, nil,
+		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			inPtr := uint32(stack[0])
+			inLen := uint32(stack[1])
+			retPtr := uint32(stack[2])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			// Collect indices of all ready pollables. Each handle is 4 bytes.
+			var readyIndices []byte
+			for i := uint32(0); i < inLen; i++ {
+				handle, _ := mem.ReadUint32Le(inPtr + i*4)
+				ready := true
+				res, ok := h.resources.Get(handle)
+				if ok {
+					if pr, ok := res.(*pollableResource); ok {
+						ready = pr.ready
+					}
+				}
+				if ready {
+					readyIndices = binary.LittleEndian.AppendUint32(readyIndices, i)
+				}
+			}
+			// If nothing is ready, return all as ready (non-blocking fallback).
+			if len(readyIndices) == 0 {
+				for i := uint32(0); i < inLen; i++ {
+					readyIndices = binary.LittleEndian.AppendUint32(readyIndices, i)
+				}
+			}
+			_ = writeListToMemory(ctx, mod, retPtr, readyIndices)
 		}))
 
 	// wasi:io/streams@0.2.0
@@ -854,6 +918,183 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			h.resources.Drop(uint32(stack[0]))
 		}))
 
+	// [method]input-stream.read: (self, len: u64, retPtr) -> ()
+	// Writes result<list<u8>, stream-error> at retPtr.
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.read",
+		[]api.ValueType{i32, i64, i32}, nil,
+		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			maxLen := uint32(stack[1])
+			retPtr := uint32(stack[2])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			res, ok := h.resources.Get(selfHandle)
+			if !ok {
+				// stream-error.closed
+				mem.WriteByte(retPtr, 1) // error discriminant
+				mem.WriteByte(retPtr+4, 0) // closed
+				return
+			}
+			sr, ok := res.(*streamResource)
+			if !ok || sr.reader == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+
+			if maxLen > 65536 {
+				maxLen = 65536
+			}
+			buf := make([]byte, maxLen)
+			n, err := sr.reader.Read(buf)
+			if n > 0 {
+				// result<list<u8>, stream-error>: ok
+				mem.WriteByte(retPtr, 0)
+				_ = writeListToMemory(ctx, mod, retPtr+4, buf[:n])
+			} else if err == io.EOF {
+				// stream-error.closed
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+			} else {
+				// Return empty ok for transient errors
+				mem.WriteByte(retPtr, 0)
+				_ = writeListToMemory(ctx, mod, retPtr+4, nil)
+			}
+		}))
+
+	// [method]input-stream.blocking-read: (self, len: u64, retPtr) -> ()
+	// Same as read but guaranteed to block until data is available.
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.blocking-read",
+		[]api.ValueType{i32, i64, i32}, nil,
+		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			maxLen := uint32(stack[1])
+			retPtr := uint32(stack[2])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			res, ok := h.resources.Get(selfHandle)
+			if !ok {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+			sr, ok := res.(*streamResource)
+			if !ok || sr.reader == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+
+			if maxLen > 65536 {
+				maxLen = 65536
+			}
+			buf := make([]byte, maxLen)
+			n, err := io.ReadAtLeast(sr.reader, buf, 1)
+			if n > 0 {
+				mem.WriteByte(retPtr, 0)
+				_ = writeListToMemory(ctx, mod, retPtr+4, buf[:n])
+			} else if err == io.EOF || err == io.ErrUnexpectedEOF {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+			} else {
+				mem.WriteByte(retPtr, 0)
+				_ = writeListToMemory(ctx, mod, retPtr+4, nil)
+			}
+		}))
+
+	// [method]input-stream.skip: (self, len: u64, retPtr) -> ()
+	// Writes result<u64, stream-error> at retPtr.
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.skip",
+		[]api.ValueType{i32, i64, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			skipLen := uint32(stack[1])
+			retPtr := uint32(stack[2])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			res, ok := h.resources.Get(selfHandle)
+			if !ok {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+			sr, ok := res.(*streamResource)
+			if !ok || sr.reader == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+
+			if skipLen > 65536 {
+				skipLen = 65536
+			}
+			buf := make([]byte, skipLen)
+			n, err := sr.reader.Read(buf)
+			if err == io.EOF && n == 0 {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+			} else {
+				mem.WriteByte(retPtr, 0)
+				mem.WriteUint64Le(retPtr+8, uint64(n))
+			}
+		}))
+
+	// [method]input-stream.blocking-skip: (self, len: u64, retPtr) -> ()
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.blocking-skip",
+		[]api.ValueType{i32, i64, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			skipLen := uint32(stack[1])
+			retPtr := uint32(stack[2])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			res, ok := h.resources.Get(selfHandle)
+			if !ok {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+			sr, ok := res.(*streamResource)
+			if !ok || sr.reader == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+
+			if skipLen > 65536 {
+				skipLen = 65536
+			}
+			skipped, err := io.CopyN(io.Discard, sr.reader, int64(skipLen))
+			if err == io.EOF && skipped == 0 {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+			} else {
+				mem.WriteByte(retPtr, 0)
+				mem.WriteUint64Le(retPtr+8, uint64(skipped))
+			}
+		}))
+
+	// [method]input-stream.subscribe: (self) -> pollable
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.subscribe",
+		[]api.ValueType{i32}, []api.ValueType{i32},
+		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			id := h.resources.New(&pollableResource{ready: true})
+			stack[0] = uint64(id)
+		}))
+
+	// [method]output-stream.check-write: (self, retPtr) -> ()
 	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.check-write",
 		[]api.ValueType{i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
@@ -868,6 +1109,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			mem.WriteUint64Le(retPtr+8, 4096)
 		}))
 
+	// [method]output-stream.write: (self, ptr, len, retPtr) -> ()
 	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.write",
 		[]api.ValueType{i32, i32, i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
@@ -896,19 +1138,189 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			mem.WriteByte(retPtr, 0) // ok
 		}))
 
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-flush",
+	// [method]output-stream.flush: (self, retPtr) -> ()
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.flush",
 		[]api.ValueType{i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
-			// self := uint32(stack[0])
 			retPtr := uint32(stack[1])
 			mem := mod.Memory()
 			if mem == nil {
 				return
 			}
-			// result<_, stream-error>: ok
-			mem.WriteByte(retPtr, 0)
+			mem.WriteByte(retPtr, 0) // ok
 		}))
 
+	// [method]output-stream.blocking-flush: (self, retPtr) -> ()
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-flush",
+		[]api.ValueType{i32, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			retPtr := uint32(stack[1])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+			mem.WriteByte(retPtr, 0) // ok
+		}))
+
+	// [method]output-stream.blocking-write-and-flush: (self, ptr, len, retPtr) -> ()
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-write-and-flush",
+		[]api.ValueType{i32, i32, i32, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			dataPtr := uint32(stack[1])
+			dataLen := uint32(stack[2])
+			retPtr := uint32(stack[3])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			data, ok := mem.Read(dataPtr, dataLen)
+			if !ok {
+				mem.WriteByte(retPtr, 1)
+				return
+			}
+
+			res, found := h.resources.Get(selfHandle)
+			if found {
+				if sr, ok := res.(*streamResource); ok && sr.writer != nil {
+					_, _ = sr.writer.Write(data)
+				}
+			}
+
+			mem.WriteByte(retPtr, 0) // ok
+		}))
+
+	// [method]output-stream.write-zeroes: (self, len: u64, retPtr) -> ()
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.write-zeroes",
+		[]api.ValueType{i32, i64, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			zeroLen := uint32(stack[1])
+			retPtr := uint32(stack[2])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			if zeroLen > 65536 {
+				zeroLen = 65536
+			}
+
+			res, found := h.resources.Get(selfHandle)
+			if found {
+				if sr, ok := res.(*streamResource); ok && sr.writer != nil {
+					zeroes := make([]byte, zeroLen)
+					_, _ = sr.writer.Write(zeroes)
+				}
+			}
+
+			mem.WriteByte(retPtr, 0) // ok
+		}))
+
+	// [method]output-stream.blocking-write-zeroes-and-flush: (self, len: u64, retPtr) -> ()
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-write-zeroes-and-flush",
+		[]api.ValueType{i32, i64, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			zeroLen := uint32(stack[1])
+			retPtr := uint32(stack[2])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			if zeroLen > 65536 {
+				zeroLen = 65536
+			}
+
+			res, found := h.resources.Get(selfHandle)
+			if found {
+				if sr, ok := res.(*streamResource); ok && sr.writer != nil {
+					zeroes := make([]byte, zeroLen)
+					_, _ = sr.writer.Write(zeroes)
+				}
+			}
+
+			mem.WriteByte(retPtr, 0) // ok
+		}))
+
+	// [method]output-stream.splice: (self, src: input-stream, len: u64, retPtr) -> ()
+	// Writes result<u64, stream-error> at retPtr.
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.splice",
+		[]api.ValueType{i32, i32, i64, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			srcHandle := uint32(stack[1])
+			spliceLen := int64(stack[2])
+			retPtr := uint32(stack[3])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			if spliceLen > 65536 {
+				spliceLen = 65536
+			}
+
+			dstRes, dstOk := h.resources.Get(selfHandle)
+			srcRes, srcOk := h.resources.Get(srcHandle)
+			if !dstOk || !srcOk {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+			dstSr, dstOk := dstRes.(*streamResource)
+			srcSr, srcOk := srcRes.(*streamResource)
+			if !dstOk || !srcOk || dstSr.writer == nil || srcSr.reader == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+
+			n, _ := io.CopyN(dstSr.writer, srcSr.reader, spliceLen)
+			mem.WriteByte(retPtr, 0)
+			mem.WriteUint64Le(retPtr+8, uint64(n))
+		}))
+
+	// [method]output-stream.blocking-splice: (self, src: input-stream, len: u64, retPtr) -> ()
+	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-splice",
+		[]api.ValueType{i32, i32, i64, i32}, nil,
+		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+			selfHandle := uint32(stack[0])
+			srcHandle := uint32(stack[1])
+			spliceLen := int64(stack[2])
+			retPtr := uint32(stack[3])
+			mem := mod.Memory()
+			if mem == nil {
+				return
+			}
+
+			if spliceLen > 65536 {
+				spliceLen = 65536
+			}
+
+			dstRes, dstOk := h.resources.Get(selfHandle)
+			srcRes, srcOk := h.resources.Get(srcHandle)
+			if !dstOk || !srcOk {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+			dstSr, dstOk := dstRes.(*streamResource)
+			srcSr, srcOk := srcRes.(*streamResource)
+			if !dstOk || !srcOk || dstSr.writer == nil || srcSr.reader == nil {
+				mem.WriteByte(retPtr, 1)
+				mem.WriteByte(retPtr+4, 0)
+				return
+			}
+
+			n, _ := io.CopyN(dstSr.writer, srcSr.reader, spliceLen)
+			mem.WriteByte(retPtr, 0)
+			mem.WriteUint64Le(retPtr+8, uint64(n))
+		}))
+
+	// [method]output-stream.subscribe: (self) -> pollable
 	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.subscribe",
 		[]api.ValueType{i32}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {

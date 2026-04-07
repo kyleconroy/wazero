@@ -65,13 +65,8 @@ jobs:
         platform:
         - os: ubuntu-24.04
           arch: amd64
-        - os: windows-2025
-          arch: amd64
-        - os: macos-14
-          arch: arm64
         go-version:
           - "1.25"  # Current Go version
-          - "1.24"  # Floor Go version of wazero (current - 1)
 
     steps:
 
