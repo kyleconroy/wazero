@@ -105,6 +105,9 @@ type ComponentHost struct {
 	// subtasks tracks pending async subtasks for the component model protocol.
 	subtasks subtaskTable
 
+	// httpClient is used for outgoing HTTP requests. If nil, requests are blocked.
+	httpClient HTTPClient
+
 	// asyncEvents receives events from background goroutines (accept, etc.)
 	// for delivery through pollEvent in the callback loop.
 	asyncEvents chan asyncEvent
@@ -405,6 +408,14 @@ func (h *ComponentHost) genericImportHandler(moduleName, funcName string, paramT
 		// Delegate to sockets-specific async-lower handler.
 		if strings.Contains(moduleName, "sockets") {
 			fn := h.asyncLowerSockets(inner, paramTypes, resultTypes)
+			if fn != nil {
+				return fn
+			}
+		}
+
+		// Delegate to HTTP-specific async-lower handler.
+		if strings.Contains(moduleName, "http") {
+			fn := h.asyncLowerHTTP(inner, paramTypes, resultTypes)
 			if fn != nil {
 				return fn
 			}

@@ -1,7 +1,10 @@
 package wasip3
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/tetratelabs/wazero"
@@ -209,6 +212,19 @@ func isValidAuthority(s string) bool {
 		}
 	}
 	return true
+}
+
+// HTTPClient is the interface for making outgoing HTTP requests.
+// *http.Client satisfies this interface.
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// WithHTTPClient sets the HTTP client used for outgoing HTTP requests.
+// If not called, outgoing requests are blocked.
+func (h *ComponentHost) WithHTTPClient(client HTTPClient) *ComponentHost {
+	h.httpClient = client
+	return h
 }
 
 // registerHTTP is a no-op; all HTTP functions are handled dynamically by
@@ -1116,4 +1132,130 @@ func (h *ComponentHost) httpImportHandler(moduleName, funcName string, paramType
 	}
 
 	return nil
+}
+
+// asyncLowerHTTP handles [async-lower] variants for wasi:http modules.
+func (h *ComponentHost) asyncLowerHTTP(inner string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
+	if inner != "handle" {
+		return nil
+	}
+
+	// [async-lower]handle: (request: i32, retPtr: i32) -> i32
+	// The request handle refers to a requestResource. We read its method, scheme,
+	// authority, path, and headers, perform a real HTTP request, and write the
+	// response handle at retPtr.
+	return api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		reqHandle := uint32(stack[0])
+		retPtr := uint32(stack[1])
+		mem := mod.Memory()
+
+		if h.httpClient == nil {
+			// No HTTP client configured — outgoing requests are not allowed.
+			if mem != nil {
+				mem.WriteByte(retPtr, 1) // Err
+			}
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+
+		res, ok := h.resources.Get(reqHandle)
+		if !ok || mem == nil {
+			if mem != nil {
+				mem.WriteByte(retPtr, 1) // Err
+			}
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+		req := res.(*requestResource)
+
+		// Build the URL from scheme, authority, and path.
+		scheme := req.scheme
+		if scheme == "" {
+			scheme = "http"
+		}
+		authority := req.authority
+		path := req.path
+		if path == "" {
+			path = "/"
+		}
+		url := scheme + "://" + authority + path
+
+		// Build the Go HTTP request.
+		method := req.method
+		if method == "" {
+			method = "GET"
+		}
+
+		// Read request body from the body stream if available.
+		var bodyReader io.Reader
+		httpReq, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+		if err != nil {
+			mem.WriteByte(retPtr, 1) // Err
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+
+		// Copy headers from the request's fields resource.
+		if headersRes, ok := h.resources.Get(req.headers); ok {
+			if fields, ok := headersRes.(*fieldsResource); ok {
+				for _, entry := range fields.entries {
+					httpReq.Header.Add(entry.name, string(entry.value))
+				}
+			}
+		}
+
+		// Perform the HTTP request.
+		resp, err := h.httpClient.Do(httpReq)
+		if err != nil {
+			mem.WriteByte(retPtr, 1) // Err
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+
+		// Read the response body.
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		// Build the response fields resource from response headers.
+		respFields := &fieldsResource{immutable: true}
+		for name, values := range resp.Header {
+			for _, v := range values {
+				respFields.entries = append(respFields.entries, fieldEntry{
+					name:  strings.ToLower(name),
+					value: []byte(v),
+				})
+			}
+		}
+		respFieldsHandle := h.resources.New(respFields)
+
+		// Create the response resource.
+		respResource := &responseResource{
+			statusCode: uint32(resp.StatusCode),
+			headers:    respFieldsHandle,
+		}
+		respHandle := h.resources.New(respResource)
+
+		// Create a stream resource for the response body.
+		bodyStreamHandle := h.resources.New(&streamResource{
+			reader: bytes.NewReader(respBody),
+		})
+
+		// Write result: Ok(response_handle).
+		// The async-lower result layout: disc(1 byte) + padding + response_handle(4 bytes) + body_stream(4 bytes)
+		mem.WriteByte(retPtr, 0) // Ok
+		mem.WriteUint32Le(retPtr+4, respHandle)
+		mem.WriteUint32Le(retPtr+8, bodyStreamHandle)
+
+		if len(resultTypes) > 0 {
+			stack[0] = 2 // RETURNED
+		}
+	})
 }
