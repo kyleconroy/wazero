@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -107,6 +108,9 @@ type ComponentHost struct {
 
 	// httpClient is used for outgoing HTTP requests. If nil, requests are blocked.
 	httpClient HTTPClient
+
+	// httpHandler is used for incoming HTTP requests. If nil, requests are blocked.
+	httpHandler http.Handler
 
 	// asyncEvents receives events from background goroutines (accept, etc.)
 	// for delivery through pollEvent in the callback loop.
@@ -415,7 +419,7 @@ func (h *ComponentHost) genericImportHandler(moduleName, funcName string, paramT
 
 		// Delegate to HTTP-specific async-lower handler.
 		if strings.Contains(moduleName, "http") {
-			fn := h.asyncLowerHTTP(inner, paramTypes, resultTypes)
+			fn := h.asyncLowerHTTP(moduleName, inner, paramTypes, resultTypes)
 			if fn != nil {
 				return fn
 			}

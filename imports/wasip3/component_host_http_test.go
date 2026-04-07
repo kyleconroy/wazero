@@ -366,6 +366,19 @@ func TestWithHTTPClient(t *testing.T) {
 	}
 }
 
+func TestWithHTTPHandler(t *testing.T) {
+	host := NewComponentHost(nil, nil, nil, nil, nil)
+	if host.httpHandler != nil {
+		t.Error("expected nil handler when none configured")
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	host.WithHTTPHandler(handler)
+	if host.httpHandler == nil {
+		t.Error("expected handler after WithHTTPHandler")
+	}
+}
+
 func TestHttpOutgoingBlockedByDefault(t *testing.T) {
 	// Without WithHTTPClient, outgoing HTTP requests should fail.
 	authority := "127.0.0.1:12345"
@@ -387,4 +400,181 @@ func TestHttpOutgoingBlockedByDefault(t *testing.T) {
 	}
 	// The component ran without panic — the handle call returned an error
 	// result to the guest instead of making a network request.
+}
+
+// TestHttpComponentIncoming is an end-to-end test that creates a minimal wasm
+// component which makes an incoming HTTP request through the wasi:http
+// incoming-handler, verified against a Go http.Handler.
+func TestHttpComponentIncoming(t *testing.T) {
+	var gotMethod, gotPath, gotHost string
+	var gotHeaders http.Header
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotHost = r.Host
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("X-Test", "ok")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("hello from handler"))
+	})
+
+	authority := "example.com"
+	componentBinary := buildHTTPIncomingComponentBinary(t, authority)
+
+	ctx := context.Background()
+	rt := wazero.NewRuntime(ctx)
+	t.Cleanup(func() { rt.Close(ctx) })
+
+	host := NewComponentHost(nil, nil, nil, nil, nil).
+		WithHTTPHandler(handler)
+
+	mod, err := InstantiateComponentWithHost(ctx, rt, componentBinary,
+		wazero.NewModuleConfig().WithName("").WithStartFunctions(), host)
+	if mod != nil {
+		t.Cleanup(func() { mod.Close(ctx) })
+	}
+	if err != nil {
+		t.Fatalf("instantiate component: %v", err)
+	}
+
+	if gotMethod != "GET" {
+		t.Errorf("method: got %q, want %q", gotMethod, "GET")
+	}
+	if gotPath != "/" {
+		t.Errorf("path: got %q, want %q", gotPath, "/")
+	}
+	if gotHost != authority {
+		t.Errorf("host: got %q, want %q", gotHost, authority)
+	}
+	if gotHeaders.Get("X-Custom") != "test-value" {
+		t.Errorf("custom header: got %q, want %q", gotHeaders.Get("X-Custom"), "test-value")
+	}
+}
+
+func TestHttpIncomingBlockedByDefault(t *testing.T) {
+	authority := "example.com"
+	componentBinary := buildHTTPIncomingComponentBinary(t, authority)
+
+	ctx := context.Background()
+	rt := wazero.NewRuntime(ctx)
+	t.Cleanup(func() { rt.Close(ctx) })
+
+	host := NewComponentHost(nil, nil, nil, nil, nil) // no WithHTTPHandler
+
+	mod, err := InstantiateComponentWithHost(ctx, rt, componentBinary,
+		wazero.NewModuleConfig().WithName("").WithStartFunctions(), host)
+	if mod != nil {
+		t.Cleanup(func() { mod.Close(ctx) })
+	}
+	if err != nil {
+		t.Fatalf("instantiate component: %v", err)
+	}
+}
+
+// buildHTTPIncomingComponentBinary constructs a minimal wasm component that
+// calls the incoming handler. Identical to buildHTTPComponentBinary but imports
+// from wasi:http/incoming-handler@0.3.0 instead of outgoing-handler.
+func buildHTTPIncomingComponentBinary(t *testing.T, authority string) []byte {
+	t.Helper()
+
+	const (
+		pathOffset      = 256
+		authOffset      = 512
+		retPtrOffset    = 768
+		hdrNameOffset   = 1024
+		hdrValueOffset  = 1040
+		fieldListOffset = 1280
+	)
+
+	pathData := []byte("/")
+	authData := []byte(authority)
+	hdrName := []byte("x-custom")
+	hdrValue := []byte("test-value")
+
+	var fieldListData [16]byte
+	le := func(buf []byte, off int, v uint32) {
+		buf[off] = byte(v)
+		buf[off+1] = byte(v >> 8)
+		buf[off+2] = byte(v >> 16)
+		buf[off+3] = byte(v >> 24)
+	}
+	le(fieldListData[:], 0, uint32(hdrNameOffset))
+	le(fieldListData[:], 4, uint32(len(hdrName)))
+	le(fieldListData[:], 8, uint32(hdrValueOffset))
+	le(fieldListData[:], 12, uint32(len(hdrValue)))
+
+	types := []wasm.FunctionType{
+		{Params: nil, Results: []wasm.ValueType{wasm.ValueTypeI32}},
+		{Params: []wasm.ValueType{i32, i32, i32, i32, i32, i32, i32}, Results: nil},
+		{Params: []wasm.ValueType{i32, i32, i32, i32}, Results: []wasm.ValueType{i32}},
+		{Params: []wasm.ValueType{i32, i32, i32, i32, i32}, Results: []wasm.ValueType{i32}},
+		{Params: []wasm.ValueType{i32, i32}, Results: []wasm.ValueType{i32}},
+		{Params: []wasm.ValueType{i32, i32, i32, i32}, Results: []wasm.ValueType{i32}},
+		{Params: []wasm.ValueType{i32, i32, i32}, Results: []wasm.ValueType{i32}},
+		{Params: []wasm.ValueType{i32, i32, i32}, Results: nil},
+	}
+
+	imports := []wasm.Import{
+		{Type: wasm.ExternTypeFunc, Module: "wasi:http/types@0.3.0", Name: "[static]fields.from-list", DescFunc: 7},
+		{Type: wasm.ExternTypeFunc, Module: "wasi:http/types@0.3.0", Name: "[static]request.new", DescFunc: 1},
+		{Type: wasm.ExternTypeFunc, Module: "wasi:http/types@0.3.0", Name: "[method]request.set-path-with-query", DescFunc: 2},
+		{Type: wasm.ExternTypeFunc, Module: "wasi:http/types@0.3.0", Name: "[method]request.set-scheme", DescFunc: 3},
+		{Type: wasm.ExternTypeFunc, Module: "wasi:http/types@0.3.0", Name: "[method]request.set-authority", DescFunc: 2},
+		// Import from incoming-handler instead of outgoing-handler.
+		{Type: wasm.ExternTypeFunc, Module: "wasi:http/incoming-handler@0.3.0", Name: "[async-lower]handle", DescFunc: 4},
+	}
+
+	functionSection := []wasm.Index{5, 0, 6}
+
+	cabiReallocBody := buildCabiReallocBody()
+	entryBody := buildEntryBody(authority, pathOffset, authOffset, retPtrOffset, fieldListOffset)
+	callbackBody := buildCallbackBody()
+
+	codeSection := []wasm.Code{
+		{Body: cabiReallocBody},
+		{LocalTypes: []wasm.ValueType{wasm.ValueTypeI32}, Body: entryBody},
+		{Body: callbackBody},
+	}
+
+	memorySection := &wasm.Memory{Min: 1, Cap: 1, Max: 1, IsMaxEncoded: true}
+
+	globalSection := []wasm.Global{
+		{
+			Type: wasm.GlobalType{ValType: wasm.ValueTypeI32, Mutable: true},
+			Init: wasm.ConstantExpression{
+				Data: append([]byte{byte(wasm.OpcodeI32Const)}, append(leb128.EncodeInt32(4096), byte(wasm.OpcodeEnd))...),
+			},
+		},
+	}
+
+	dataSegments := []wasm.DataSegment{
+		makeDataSegment(pathOffset, pathData),
+		makeDataSegment(authOffset, authData),
+		makeDataSegment(hdrNameOffset, hdrName),
+		makeDataSegment(hdrValueOffset, hdrValue),
+		makeDataSegment(fieldListOffset, fieldListData[:]),
+	}
+	dataCount := uint32(len(dataSegments))
+
+	exports := []wasm.Export{
+		{Type: wasm.ExternTypeMemory, Name: "memory", Index: 0},
+		{Type: wasm.ExternTypeFunc, Name: "cabi_realloc", Index: 6},
+		{Type: wasm.ExternTypeFunc, Name: "[async-lift]wasi:cli/run@0.3.0-rc-2026-03-15#run", Index: 7},
+		{Type: wasm.ExternTypeFunc, Name: "[callback][async-lift]wasi:cli/run@0.3.0-rc-2026-03-15#run", Index: 8},
+	}
+
+	mod := &wasm.Module{
+		TypeSection:      types,
+		ImportSection:    imports,
+		FunctionSection:  functionSection,
+		MemorySection:    memorySection,
+		GlobalSection:    globalSection,
+		ExportSection:    exports,
+		CodeSection:      codeSection,
+		DataSection:      dataSegments,
+		DataCountSection: &dataCount,
+	}
+
+	coreModuleBytes := binaryencoding.EncodeModule(mod)
+	return wrapInComponent(coreModuleBytes)
 }
