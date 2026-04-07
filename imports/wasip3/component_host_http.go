@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 
 	"github.com/tetratelabs/wazero"
@@ -224,6 +225,13 @@ type HTTPClient interface {
 // If not called, outgoing requests are blocked.
 func (h *ComponentHost) WithHTTPClient(client HTTPClient) *ComponentHost {
 	h.httpClient = client
+	return h
+}
+
+// WithHTTPHandler sets the HTTP handler used for incoming HTTP requests.
+// If not called, incoming requests are blocked.
+func (h *ComponentHost) WithHTTPHandler(handler http.Handler) *ComponentHost {
+	h.httpHandler = handler
 	return h
 }
 
@@ -1135,11 +1143,19 @@ func (h *ComponentHost) httpImportHandler(moduleName, funcName string, paramType
 }
 
 // asyncLowerHTTP handles [async-lower] variants for wasi:http modules.
-func (h *ComponentHost) asyncLowerHTTP(inner string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
+func (h *ComponentHost) asyncLowerHTTP(moduleName, inner string, paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
 	if inner != "handle" {
 		return nil
 	}
 
+	if strings.Contains(moduleName, "incoming-handler") {
+		return h.asyncLowerHTTPIncoming(paramTypes, resultTypes)
+	}
+	return h.asyncLowerHTTPOutgoing(paramTypes, resultTypes)
+}
+
+// asyncLowerHTTPOutgoing handles [async-lower]handle for wasi:http/outgoing-handler.
+func (h *ComponentHost) asyncLowerHTTPOutgoing(paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
 	// [async-lower]handle: (request: i32, retPtr: i32) -> i32
 	// The request handle refers to a requestResource. We read its method, scheme,
 	// authority, path, and headers, perform a real HTTP request, and write the
@@ -1250,6 +1266,113 @@ func (h *ComponentHost) asyncLowerHTTP(inner string, paramTypes, resultTypes []a
 
 		// Write result: Ok(response_handle).
 		// The async-lower result layout: disc(1 byte) + padding + response_handle(4 bytes) + body_stream(4 bytes)
+		mem.WriteByte(retPtr, 0) // Ok
+		mem.WriteUint32Le(retPtr+4, respHandle)
+		mem.WriteUint32Le(retPtr+8, bodyStreamHandle)
+
+		if len(resultTypes) > 0 {
+			stack[0] = 2 // RETURNED
+		}
+	})
+}
+
+// asyncLowerHTTPIncoming handles [async-lower]handle for wasi:http/incoming-handler.
+// It routes the guest's request through the configured http.Handler and returns the response.
+func (h *ComponentHost) asyncLowerHTTPIncoming(paramTypes, resultTypes []api.ValueType) api.GoModuleFunction {
+	// [async-lower]handle: (request: i32, retPtr: i32) -> i32
+	return api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		reqHandle := uint32(stack[0])
+		retPtr := uint32(stack[1])
+		mem := mod.Memory()
+
+		if h.httpHandler == nil {
+			if mem != nil {
+				mem.WriteByte(retPtr, 1) // Err
+			}
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+
+		res, ok := h.resources.Get(reqHandle)
+		if !ok || mem == nil {
+			if mem != nil {
+				mem.WriteByte(retPtr, 1) // Err
+			}
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+		req := res.(*requestResource)
+
+		// Build the URL from scheme, authority, and path.
+		scheme := req.scheme
+		if scheme == "" {
+			scheme = "http"
+		}
+		authority := req.authority
+		path := req.path
+		if path == "" {
+			path = "/"
+		}
+		url := scheme + "://" + authority + path
+
+		method := req.method
+		if method == "" {
+			method = "GET"
+		}
+
+		var bodyReader io.Reader
+		httpReq, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+		if err != nil {
+			mem.WriteByte(retPtr, 1) // Err
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+
+		// Copy headers from the request's fields resource.
+		if headersRes, ok := h.resources.Get(req.headers); ok {
+			if fields, ok := headersRes.(*fieldsResource); ok {
+				for _, entry := range fields.entries {
+					httpReq.Header.Add(entry.name, string(entry.value))
+				}
+			}
+		}
+
+		// Route through the configured http.Handler using a ResponseRecorder.
+		recorder := httptest.NewRecorder()
+		h.httpHandler.ServeHTTP(recorder, httpReq)
+		result := recorder.Result()
+
+		respBody, _ := io.ReadAll(result.Body)
+		result.Body.Close()
+
+		// Build the response fields resource from response headers.
+		respFields := &fieldsResource{immutable: true}
+		for name, values := range result.Header {
+			for _, v := range values {
+				respFields.entries = append(respFields.entries, fieldEntry{
+					name:  strings.ToLower(name),
+					value: []byte(v),
+				})
+			}
+		}
+		respFieldsHandle := h.resources.New(respFields)
+
+		respResource := &responseResource{
+			statusCode: uint32(result.StatusCode),
+			headers:    respFieldsHandle,
+		}
+		respHandle := h.resources.New(respResource)
+
+		bodyStreamHandle := h.resources.New(&streamResource{
+			reader: bytes.NewReader(respBody),
+		})
+
 		mem.WriteByte(retPtr, 0) // Ok
 		mem.WriteUint32Le(retPtr+4, respHandle)
 		mem.WriteUint32Le(retPtr+8, bodyStreamHandle)
