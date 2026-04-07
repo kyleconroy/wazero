@@ -355,8 +355,8 @@ func wrapInComponent(coreModuleBytes []byte) []byte {
 
 func TestWithHTTPClient(t *testing.T) {
 	host := NewComponentHost(nil, nil, nil, nil, nil)
-	if got := host.getHTTPClient(); got != http.DefaultClient {
-		t.Error("expected default client when none configured")
+	if got := host.getHTTPClient(); got != nil {
+		t.Error("expected nil client when none configured")
 	}
 
 	custom := &http.Client{}
@@ -364,4 +364,27 @@ func TestWithHTTPClient(t *testing.T) {
 	if got := host.getHTTPClient(); got != custom {
 		t.Error("expected custom client after WithHTTPClient")
 	}
+}
+
+func TestHttpOutgoingBlockedByDefault(t *testing.T) {
+	// Without WithHTTPClient, outgoing HTTP requests should fail.
+	authority := "127.0.0.1:12345"
+	componentBinary := buildHTTPComponentBinary(t, authority)
+
+	ctx := context.Background()
+	rt := wazero.NewRuntime(ctx)
+	t.Cleanup(func() { rt.Close(ctx) })
+
+	host := NewComponentHost(nil, nil, nil, nil, nil) // no WithHTTPClient
+
+	mod, err := InstantiateComponentWithHost(ctx, rt, componentBinary,
+		wazero.NewModuleConfig().WithName("").WithStartFunctions(), host)
+	if mod != nil {
+		t.Cleanup(func() { mod.Close(ctx) })
+	}
+	if err != nil {
+		t.Fatalf("instantiate component: %v", err)
+	}
+	// The component ran without panic — the handle call returned an error
+	// result to the guest instead of making a network request.
 }

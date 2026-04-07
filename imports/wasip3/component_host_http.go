@@ -221,12 +221,9 @@ func (h *ComponentHost) WithHTTPClient(client *http.Client) *ComponentHost {
 	return h
 }
 
-// getHTTPClient returns the configured HTTP client or http.DefaultClient.
+// getHTTPClient returns the configured HTTP client, or nil if none was set.
 func (h *ComponentHost) getHTTPClient() *http.Client {
-	if h.httpClient != nil {
-		return h.httpClient
-	}
-	return http.DefaultClient
+	return h.httpClient
 }
 
 // registerHTTP is a no-op; all HTTP functions are handled dynamically by
@@ -1151,9 +1148,20 @@ func (h *ComponentHost) asyncLowerHTTP(inner string, paramTypes, resultTypes []a
 		retPtr := uint32(stack[1])
 		mem := mod.Memory()
 
+		client := h.getHTTPClient()
+		if client == nil {
+			// No HTTP client configured — outgoing requests are not allowed.
+			if mem != nil {
+				mem.WriteByte(retPtr, 1) // Err
+			}
+			if len(resultTypes) > 0 {
+				stack[0] = 2 // RETURNED
+			}
+			return
+		}
+
 		res, ok := h.resources.Get(reqHandle)
 		if !ok || mem == nil {
-			// Error: write error result and return RETURNED.
 			if mem != nil {
 				mem.WriteByte(retPtr, 1) // Err
 			}
@@ -1203,7 +1211,7 @@ func (h *ComponentHost) asyncLowerHTTP(inner string, paramTypes, resultTypes []a
 		}
 
 		// Perform the HTTP request.
-		resp, err := h.getHTTPClient().Do(httpReq)
+		resp, err := client.Do(httpReq)
 		if err != nil {
 			mem.WriteByte(retPtr, 1) // Err
 			if len(resultTypes) > 0 {
