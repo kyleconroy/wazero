@@ -79,6 +79,9 @@ jobs:
     needs: build_zig_test_binary
     name: Zig (${{ matrix.os.name }}, ${{ matrix.os.arch }})
     runs-on: ${{ matrix.os.version }}
+    if: >-
+      github.event_name == 'push' ||
+      matrix.os.name == 'Ubuntu'
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
@@ -120,8 +123,11 @@ jobs:
           go test -bench='BenchmarkZig' -timeout=20m -benchtime=1x
 
   wasi-testsuite:
-    name: wasi-testsuite
+    name: wasi-testsuite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    if: >-
+      github.event_name == 'push' ||
+      matrix.os == 'ubuntu-24.04'
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
@@ -193,6 +199,9 @@ jobs:
     # we have to build and cache on each OS unlike others in this file.
     name: Go-${{ matrix.go-version }} (${{ matrix.os.name }}, ${{ matrix.os.arch }})
     runs-on: ${{ matrix.os.version }}
+    if: >-
+      github.event_name == 'push' ||
+      (matrix.os.name == 'Ubuntu' && matrix.go-version == '1.25')
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
@@ -250,6 +259,9 @@ jobs:
   libsodium:
     name: libsodium (${{ matrix.os.name }}, ${{ matrix.os.arch }})
     runs-on: ${{ matrix.os.version }}
+    if: >-
+      github.event_name == 'push' ||
+      matrix.os.name == 'Ubuntu'
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:

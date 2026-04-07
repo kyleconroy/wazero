@@ -59,6 +59,9 @@ jobs:
   test:
     name: ${{ matrix.platform.arch }}, ${{ matrix.platform.os }}, Go-${{ matrix.go-version }}
     runs-on: ${{ matrix.platform.os }}
+    if: >-
+      github.event_name == 'push' ||
+      (matrix.platform.os == 'ubuntu-24.04' && matrix.go-version == '1.25')
     strategy:
       fail-fast: false  # don't fail fast as sometimes failures are arch/OS specific
       matrix:  # Use versions consistent with wazero's Go support policy.
