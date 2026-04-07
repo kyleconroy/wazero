@@ -88,6 +88,19 @@ jobs:
           - version: ubuntu-24.04
             name: Ubuntu
             arch: amd64
+        include:  # Additional targets only on push to main
+          - os:
+              version: macos-14
+              name: macOS
+              arch: arm64
+            push_only: true
+          - os:
+              version: windows-2025
+              name: Windows
+              arch: amd64
+            push_only: true
+        exclude:
+          - push_only: ${{ github.event_name == 'pull_request' }}
 
     steps:
       - name: Checkout wazero
@@ -120,6 +133,13 @@ jobs:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
         os: [ubuntu-24.04]
+        include:  # Additional targets only on push to main
+          - os: macos-14
+            push_only: true
+          - os: windows-2022
+            push_only: true
+        exclude:
+          - push_only: ${{ github.event_name == 'pull_request' }}
 
     steps:
       - uses: actions/cache@v4
@@ -198,6 +218,39 @@ jobs:
           arch: amd64
         go-version:
           - "1.25"
+        include:  # Additional targets only on push to main
+          - os:
+              version: macos-14
+              name: macOS
+              arch: arm64
+            go-version: "1.25"
+            push_only: true
+          - os:
+              version: windows-2025
+              name: Windows
+              arch: amd64
+            go-version: "1.25"
+            push_only: true
+          - os:
+              version: ubuntu-24.04
+              name: Ubuntu
+              arch: amd64
+            go-version: "1.24"
+            push_only: true
+          - os:
+              version: macos-14
+              name: macOS
+              arch: arm64
+            go-version: "1.24"
+            push_only: true
+          - os:
+              version: windows-2025
+              name: Windows
+              arch: amd64
+            go-version: "1.24"
+            push_only: true
+        exclude:
+          - push_only: ${{ github.event_name == 'pull_request' }}
 
     steps:
       - id: setup-go
@@ -246,6 +299,14 @@ jobs:
           - version: ubuntu-24.04
             name: Ubuntu
             arch: amd64
+        include:  # Additional targets only on push to main
+          - os:
+              version: macos-14
+              name: macOS
+              arch: arm64
+            push_only: true
+        exclude:
+          - push_only: ${{ github.event_name == 'pull_request' }}
 
     steps:
       - name: Checkout wazero

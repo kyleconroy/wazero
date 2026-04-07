@@ -821,8 +821,8 @@ func (h *ComponentHost) registerCLIp3(cl *wazero.ComponentLinker) {
 
 // registerIO registers wasi:io/* host functions.
 func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
-	// wasi:io/error@0.2.0
-	cl.DefineFunc("wasi:io/error@0.2.0", "[resource-drop]error",
+	// wasi:io/error@0.3.0
+	cl.DefineFunc("wasi:io/error@0.3.0", "[resource-drop]error",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			h.resources.Drop(uint32(stack[0]))
@@ -830,7 +830,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 
 	// [method]error.to-debug-string: (self) -> (retPtr)
 	// Writes a string (ptr, len) at retPtr describing the error.
-	cl.DefineFunc("wasi:io/error@0.2.0", "[method]error.to-debug-string",
+	cl.DefineFunc("wasi:io/error@0.3.0", "[method]error.to-debug-string",
 		[]api.ValueType{i32, i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			// self := uint32(stack[0])
@@ -839,15 +839,15 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			_ = writeListToMemory(ctx, mod, retPtr, nil)
 		}))
 
-	// wasi:io/poll@0.2.0
-	cl.DefineFunc("wasi:io/poll@0.2.0", "[resource-drop]pollable",
+	// wasi:io/poll@0.3.0
+	cl.DefineFunc("wasi:io/poll@0.3.0", "[resource-drop]pollable",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			h.resources.Drop(uint32(stack[0]))
 		}))
 
 	// [method]pollable.ready: (self) -> bool
-	cl.DefineFunc("wasi:io/poll@0.2.0", "[method]pollable.ready",
+	cl.DefineFunc("wasi:io/poll@0.3.0", "[method]pollable.ready",
 		[]api.ValueType{i32}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			handle := uint32(stack[0])
@@ -862,7 +862,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]pollable.block: (self) -> ()
-	cl.DefineFunc("wasi:io/poll@0.2.0", "[method]pollable.block",
+	cl.DefineFunc("wasi:io/poll@0.3.0", "[method]pollable.block",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			// Block until ready - for now just return immediately.
@@ -870,7 +870,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 
 	// poll: (list<borrow<pollable>>) -> list<u32>
 	// Takes (ptr, len) of pollable handles, returns (ptr, len) of ready indices.
-	cl.DefineFunc("wasi:io/poll@0.2.0", "poll",
+	cl.DefineFunc("wasi:io/poll@0.3.0", "poll",
 		[]api.ValueType{i32, i32, i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			inPtr := uint32(stack[0])
@@ -905,14 +905,14 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			_ = writeListToMemory(ctx, mod, retPtr, readyIndices)
 		}))
 
-	// wasi:io/streams@0.2.0
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[resource-drop]input-stream",
+	// wasi:io/streams@0.3.0
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[resource-drop]input-stream",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			h.resources.Drop(uint32(stack[0]))
 		}))
 
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[resource-drop]output-stream",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[resource-drop]output-stream",
 		[]api.ValueType{i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			h.resources.Drop(uint32(stack[0]))
@@ -920,7 +920,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 
 	// [method]input-stream.read: (self, len: u64, retPtr) -> ()
 	// Writes result<list<u8>, stream-error> at retPtr.
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.read",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]input-stream.read",
 		[]api.ValueType{i32, i64, i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -967,7 +967,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 
 	// [method]input-stream.blocking-read: (self, len: u64, retPtr) -> ()
 	// Same as read but guaranteed to block until data is available.
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.blocking-read",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]input-stream.blocking-read",
 		[]api.ValueType{i32, i64, i32}, nil,
 		api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1010,7 +1010,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 
 	// [method]input-stream.skip: (self, len: u64, retPtr) -> ()
 	// Writes result<u64, stream-error> at retPtr.
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.skip",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]input-stream.skip",
 		[]api.ValueType{i32, i64, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1049,7 +1049,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]input-stream.blocking-skip: (self, len: u64, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.blocking-skip",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]input-stream.blocking-skip",
 		[]api.ValueType{i32, i64, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1087,7 +1087,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]input-stream.subscribe: (self) -> pollable
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]input-stream.subscribe",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]input-stream.subscribe",
 		[]api.ValueType{i32}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			id := h.resources.New(&pollableResource{ready: true})
@@ -1095,7 +1095,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.check-write: (self, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.check-write",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.check-write",
 		[]api.ValueType{i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			// self := uint32(stack[0])
@@ -1110,7 +1110,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.write: (self, ptr, len, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.write",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.write",
 		[]api.ValueType{i32, i32, i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1139,7 +1139,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.flush: (self, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.flush",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.flush",
 		[]api.ValueType{i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[1])
@@ -1151,7 +1151,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.blocking-flush: (self, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-flush",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.blocking-flush",
 		[]api.ValueType{i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			retPtr := uint32(stack[1])
@@ -1163,7 +1163,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.blocking-write-and-flush: (self, ptr, len, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-write-and-flush",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.blocking-write-and-flush",
 		[]api.ValueType{i32, i32, i32, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1192,7 +1192,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.write-zeroes: (self, len: u64, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.write-zeroes",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.write-zeroes",
 		[]api.ValueType{i32, i64, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1219,7 +1219,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.blocking-write-zeroes-and-flush: (self, len: u64, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-write-zeroes-and-flush",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.blocking-write-zeroes-and-flush",
 		[]api.ValueType{i32, i64, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1247,7 +1247,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 
 	// [method]output-stream.splice: (self, src: input-stream, len: u64, retPtr) -> ()
 	// Writes result<u64, stream-error> at retPtr.
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.splice",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.splice",
 		[]api.ValueType{i32, i32, i64, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1284,7 +1284,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.blocking-splice: (self, src: input-stream, len: u64, retPtr) -> ()
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.blocking-splice",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.blocking-splice",
 		[]api.ValueType{i32, i32, i64, i32}, nil,
 		api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 			selfHandle := uint32(stack[0])
@@ -1321,7 +1321,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 		}))
 
 	// [method]output-stream.subscribe: (self) -> pollable
-	cl.DefineFunc("wasi:io/streams@0.2.0", "[method]output-stream.subscribe",
+	cl.DefineFunc("wasi:io/streams@0.3.0", "[method]output-stream.subscribe",
 		[]api.ValueType{i32}, []api.ValueType{i32},
 		api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 			// Return a pollable handle.

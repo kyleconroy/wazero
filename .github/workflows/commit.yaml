@@ -67,6 +67,34 @@ jobs:
           arch: amd64
         go-version:
           - "1.25"  # Current Go version
+        include:  # Additional targets only on push to main
+          - platform:
+              os: windows-2025
+              arch: amd64
+            go-version: "1.25"
+            push_only: true
+          - platform:
+              os: macos-14
+              arch: arm64
+            go-version: "1.25"
+            push_only: true
+          - platform:
+              os: ubuntu-24.04
+              arch: amd64
+            go-version: "1.24"
+            push_only: true
+          - platform:
+              os: windows-2025
+              arch: amd64
+            go-version: "1.24"
+            push_only: true
+          - platform:
+              os: macos-14
+              arch: arm64
+            go-version: "1.24"
+            push_only: true
+        exclude:
+          - push_only: ${{ github.event_name == 'pull_request' }}
 
     steps:
 
