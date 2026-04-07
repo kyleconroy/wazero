@@ -79,6 +79,9 @@ jobs:
     needs: build_zig_test_binary
     name: Zig (${{ matrix.os.name }}, ${{ matrix.os.arch }})
     runs-on: ${{ matrix.os.version }}
+    if: >-
+      github.event_name == 'push' ||
+      matrix.os.name == 'Ubuntu'
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
@@ -88,19 +91,12 @@ jobs:
           - version: ubuntu-24.04
             name: Ubuntu
             arch: amd64
-        include:  # Additional targets only on push to main
-          - os:
-              version: macos-14
-              name: macOS
-              arch: arm64
-            push_only: true
-          - os:
-              version: windows-2025
-              name: Windows
-              arch: amd64
-            push_only: true
-        exclude:
-          - push_only: ${{ github.event_name == 'pull_request' }}
+          - version: macos-14
+            name: macOS
+            arch: arm64
+          - version: windows-2025
+            name: Windows
+            arch: amd64
 
     steps:
       - name: Checkout wazero
@@ -127,19 +123,15 @@ jobs:
           go test -bench='BenchmarkZig' -timeout=20m -benchtime=1x
 
   wasi-testsuite:
-    name: wasi-testsuite
+    name: wasi-testsuite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    if: >-
+      github.event_name == 'push' ||
+      matrix.os == 'ubuntu-24.04'
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
-        os: [ubuntu-24.04]
-        include:  # Additional targets only on push to main
-          - os: macos-14
-            push_only: true
-          - os: windows-2022
-            push_only: true
-        exclude:
-          - push_only: ${{ github.event_name == 'pull_request' }}
+        os: [ubuntu-24.04, macos-14, windows-2022]
 
     steps:
       - uses: actions/cache@v4
@@ -207,6 +199,9 @@ jobs:
     # we have to build and cache on each OS unlike others in this file.
     name: Go-${{ matrix.go-version }} (${{ matrix.os.name }}, ${{ matrix.os.arch }})
     runs-on: ${{ matrix.os.version }}
+    if: >-
+      github.event_name == 'push' ||
+      (matrix.os.name == 'Ubuntu' && matrix.go-version == '1.25')
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
@@ -216,41 +211,15 @@ jobs:
         - version: ubuntu-24.04
           name: Ubuntu
           arch: amd64
+        - version: macos-14
+          name: macOS
+          arch: arm64
+        - version: windows-2025
+          name: Windows
+          arch: amd64
         go-version:
           - "1.25"
-        include:  # Additional targets only on push to main
-          - os:
-              version: macos-14
-              name: macOS
-              arch: arm64
-            go-version: "1.25"
-            push_only: true
-          - os:
-              version: windows-2025
-              name: Windows
-              arch: amd64
-            go-version: "1.25"
-            push_only: true
-          - os:
-              version: ubuntu-24.04
-              name: Ubuntu
-              arch: amd64
-            go-version: "1.24"
-            push_only: true
-          - os:
-              version: macos-14
-              name: macOS
-              arch: arm64
-            go-version: "1.24"
-            push_only: true
-          - os:
-              version: windows-2025
-              name: Windows
-              arch: amd64
-            go-version: "1.24"
-            push_only: true
-        exclude:
-          - push_only: ${{ github.event_name == 'pull_request' }}
+          - "1.24"
 
     steps:
       - id: setup-go
@@ -290,6 +259,9 @@ jobs:
   libsodium:
     name: libsodium (${{ matrix.os.name }}, ${{ matrix.os.arch }})
     runs-on: ${{ matrix.os.version }}
+    if: >-
+      github.event_name == 'push' ||
+      matrix.os.name == 'Ubuntu'
     strategy:
       fail-fast: false # don't fail fast as sometimes failures are arch/OS specific
       matrix:
@@ -299,14 +271,9 @@ jobs:
           - version: ubuntu-24.04
             name: Ubuntu
             arch: amd64
-        include:  # Additional targets only on push to main
-          - os:
-              version: macos-14
-              name: macOS
-              arch: arm64
-            push_only: true
-        exclude:
-          - push_only: ${{ github.event_name == 'pull_request' }}
+          - version: macos-14
+            name: macOS
+            arch: arm64
 
     steps:
       - name: Checkout wazero
