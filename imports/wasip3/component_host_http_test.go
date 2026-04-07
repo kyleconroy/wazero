@@ -28,7 +28,7 @@ func TestHttpComponentOutgoing(t *testing.T) {
 		gotHeaders = r.Header.Clone()
 		w.Header().Set("X-Test", "ok")
 		w.WriteHeader(200)
-		w.Write([]byte("hello from server"))
+		_, _ = w.Write([]byte("hello from server"))
 	}))
 	defer ts.Close()
 
@@ -278,7 +278,7 @@ func buildEntryBody(authority string, pathOffset, authOffset, retPtrOffset, fiel
 	// First check: retPtr+0 should be 0 (Ok).
 	b = i32Const(b, int32(retPtrOffset)+4)
 	b = append(b, byte(wasm.OpcodeI32Load), 0x02, 0x00) // i32.load align=2 offset=0
-	b = append(b, byte(wasm.OpcodeLocalSet), 0x00)       // local.set 0 = fields_handle
+	b = append(b, byte(wasm.OpcodeLocalSet), 0x00)      // local.set 0 = fields_handle
 
 	// Call [static]request.new(fields_handle, 0, 0, 0, 0, 0, retPtr) — imported func 1
 	b = append(b, byte(wasm.OpcodeLocalGet), 0x00) // fields_handle
@@ -293,13 +293,13 @@ func buildEntryBody(authority string, pathOffset, authOffset, retPtrOffset, fiel
 	// Load req_handle from retPtr (request.new writes handle at retPtr+0).
 	b = i32Const(b, int32(retPtrOffset))
 	b = append(b, byte(wasm.OpcodeI32Load), 0x02, 0x00) // i32.load align=2 offset=0
-	b = append(b, byte(wasm.OpcodeLocalSet), 0x00)       // local.set 0 = req_handle
+	b = append(b, byte(wasm.OpcodeLocalSet), 0x00)      // local.set 0 = req_handle
 
 	// Call set-path-with-query(req_handle, 1=some, pathPtr, pathLen=1) — imported func 2
 	b = append(b, byte(wasm.OpcodeLocalGet), 0x00)
-	b = i32Const(b, 1)                    // some
-	b = i32Const(b, int32(pathOffset))     // path ptr
-	b = i32Const(b, 1)                    // path len ("/" = 1 byte)
+	b = i32Const(b, 1)                 // some
+	b = i32Const(b, int32(pathOffset)) // path ptr
+	b = i32Const(b, 1)                 // path len ("/" = 1 byte)
 	b = callFunc(b, 2)
 	b = append(b, byte(wasm.OpcodeDrop))
 
@@ -314,9 +314,9 @@ func buildEntryBody(authority string, pathOffset, authOffset, retPtrOffset, fiel
 
 	// Call set-authority(req_handle, 1=some, authPtr, authLen) — imported func 4
 	b = append(b, byte(wasm.OpcodeLocalGet), 0x00)
-	b = i32Const(b, 1)                  // some
-	b = i32Const(b, int32(authOffset))   // authority ptr
-	b = i32Const(b, authLen)             // authority len
+	b = i32Const(b, 1)                 // some
+	b = i32Const(b, int32(authOffset)) // authority ptr
+	b = i32Const(b, authLen)           // authority len
 	b = callFunc(b, 4)
 	b = append(b, byte(wasm.OpcodeDrop))
 
