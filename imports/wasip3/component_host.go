@@ -934,7 +934,7 @@ func (h *ComponentHost) registerIO(cl *wazero.ComponentLinker) {
 			res, ok := h.resources.Get(selfHandle)
 			if !ok {
 				// stream-error.closed
-				mem.WriteByte(retPtr, 1) // error discriminant
+				mem.WriteByte(retPtr, 1)   // error discriminant
 				mem.WriteByte(retPtr+4, 0) // closed
 				return
 			}
