@@ -214,16 +214,17 @@ func isValidAuthority(s string) bool {
 	return true
 }
 
-// WithHTTPClient sets the HTTP client used for outgoing HTTP requests.
-// If not called, http.DefaultClient is used.
-func (h *ComponentHost) WithHTTPClient(client *http.Client) *ComponentHost {
-	h.httpClient = client
-	return h
+// HTTPClient is the interface for making outgoing HTTP requests.
+// *http.Client satisfies this interface.
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
 }
 
-// getHTTPClient returns the configured HTTP client, or nil if none was set.
-func (h *ComponentHost) getHTTPClient() *http.Client {
-	return h.httpClient
+// WithHTTPClient sets the HTTP client used for outgoing HTTP requests.
+// If not called, outgoing requests are blocked.
+func (h *ComponentHost) WithHTTPClient(client HTTPClient) *ComponentHost {
+	h.httpClient = client
+	return h
 }
 
 // registerHTTP is a no-op; all HTTP functions are handled dynamically by
@@ -1148,8 +1149,7 @@ func (h *ComponentHost) asyncLowerHTTP(inner string, paramTypes, resultTypes []a
 		retPtr := uint32(stack[1])
 		mem := mod.Memory()
 
-		client := h.getHTTPClient()
-		if client == nil {
+		if h.httpClient == nil {
 			// No HTTP client configured — outgoing requests are not allowed.
 			if mem != nil {
 				mem.WriteByte(retPtr, 1) // Err
@@ -1211,7 +1211,7 @@ func (h *ComponentHost) asyncLowerHTTP(inner string, paramTypes, resultTypes []a
 		}
 
 		// Perform the HTTP request.
-		resp, err := client.Do(httpReq)
+		resp, err := h.httpClient.Do(httpReq)
 		if err != nil {
 			mem.WriteByte(retPtr, 1) // Err
 			if len(resultTypes) > 0 {

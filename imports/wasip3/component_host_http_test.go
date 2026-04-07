@@ -355,13 +355,13 @@ func wrapInComponent(coreModuleBytes []byte) []byte {
 
 func TestWithHTTPClient(t *testing.T) {
 	host := NewComponentHost(nil, nil, nil, nil, nil)
-	if got := host.getHTTPClient(); got != nil {
+	if host.httpClient != nil {
 		t.Error("expected nil client when none configured")
 	}
 
 	custom := &http.Client{}
 	host.WithHTTPClient(custom)
-	if got := host.getHTTPClient(); got != custom {
+	if host.httpClient != custom {
 		t.Error("expected custom client after WithHTTPClient")
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -106,8 +105,8 @@ type ComponentHost struct {
 	// subtasks tracks pending async subtasks for the component model protocol.
 	subtasks subtaskTable
 
-	// httpClient is used for outgoing HTTP requests. If nil, http.DefaultClient is used.
-	httpClient *http.Client
+	// httpClient is used for outgoing HTTP requests. If nil, requests are blocked.
+	httpClient HTTPClient
 
 	// asyncEvents receives events from background goroutines (accept, etc.)
 	// for delivery through pollEvent in the callback loop.
