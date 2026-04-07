@@ -194,8 +194,8 @@ func (st *subtaskTable) Drop(idx uint32) {
 }
 
 type preopen struct {
-	path      string // host path
-	guestPath string // guest-visible path
+	fs        preopenFS // filesystem operations
+	guestPath string    // guest-visible path
 }
 
 // streamResource represents one end of a stream. Both ends of a pair

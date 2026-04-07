@@ -124,10 +124,12 @@ func instantiateP3WithPreopens(t *testing.T, wasmFile string, args []string, env
 	rt := wazero.NewRuntime(ctx)
 	t.Cleanup(func() { rt.Close(ctx) })
 
-	host := NewComponentHost(os.Stdin, os.Stdout, os.Stderr, args, env)
+	fsConfig := NewFSConfig()
 	for _, po := range preopens {
-		host.AddPreopen(po[0], po[1])
+		fsConfig = fsConfig.WithDirMount(po[0], po[1])
 	}
+	host := NewComponentHost(os.Stdin, os.Stdout, os.Stderr, args, env).
+		WithFSConfig(fsConfig)
 	mod, err := InstantiateComponentWithHost(ctx, rt, data,
 		wazero.NewModuleConfig().WithName("").WithStartFunctions(), host)
 	if mod != nil {

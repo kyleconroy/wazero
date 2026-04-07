@@ -20,8 +20,9 @@ import (
 
 // descriptorResource represents an open filesystem descriptor (file or directory).
 type descriptorResource struct {
-	path      string
-	file      *os.File
+	pfs       preopenFS // filesystem this descriptor belongs to
+	relPath   string    // path relative to the preopen root ("." for root)
+	file      *os.File  // open file handle (nil for directory descriptors and fs.FS)
 	isPreopen bool
 	guestPath string
 	descFlags byte // descriptor-flags the descriptor was opened with
@@ -87,9 +88,67 @@ const (
 	ecCrossDevice     = 35
 )
 
-// AddPreopen adds a filesystem preopen to the component host.
-func (h *ComponentHost) AddPreopen(hostPath, guestPath string) {
-	h.preopens = append(h.preopens, preopen{path: hostPath, guestPath: guestPath})
+// FSConfig configures filesystem paths the embedding host allows the wasm
+// guest to access. Unconfigured paths are not allowed.
+//
+// FSConfig is immutable. Each WithXXX function returns a new instance
+// including the corresponding change.
+type FSConfig struct {
+	preopens []preopen
+}
+
+// NewFSConfig returns an empty FSConfig.
+func NewFSConfig() *FSConfig {
+	return &FSConfig{}
+}
+
+// WithDirMount assigns a directory at dir to any paths beginning at guestPath.
+//
+// The guest will have full read-write access to this directory.
+func (c *FSConfig) WithDirMount(dir, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &hostPathFS{root: dir}, guestPath: guestPath})
+	return ret
+}
+
+// WithReadOnlyDirMount assigns a directory at dir to any paths beginning at
+// guestPath. This is the same as WithDirMount except only read operations are
+// permitted.
+func (c *FSConfig) WithReadOnlyDirMount(dir, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &goFS{fsys: os.DirFS(dir), name: guestPath}, guestPath: guestPath})
+	return ret
+}
+
+// WithFSMount assigns an fs.FS file system for any paths beginning at
+// guestPath. The fs.FS is read-only; write operations will return errors.
+func (c *FSConfig) WithFSMount(fsys fs.FS, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &goFS{fsys: fsys, name: guestPath}, guestPath: guestPath})
+	return ret
+}
+
+// WithRootMount assigns an os.Root for any paths beginning at guestPath.
+// The Root provides sandboxed filesystem access that prevents path traversal
+// outside the root directory. Some operations (rename, link, symlink, chtimes)
+// are not available through os.Root in Go 1.24 and will return errors.
+func (c *FSConfig) WithRootMount(root *os.Root, guestPath string) *FSConfig {
+	ret := c.clone()
+	ret.preopens = append(ret.preopens, preopen{fs: &rootFS{root: root}, guestPath: guestPath})
+	return ret
+}
+
+func (c *FSConfig) clone() *FSConfig {
+	ret := &FSConfig{}
+	ret.preopens = make([]preopen, len(c.preopens))
+	copy(ret.preopens, c.preopens)
+	return ret
+}
+
+// WithFSConfig sets the filesystem configuration for the component host.
+func (h *ComponentHost) WithFSConfig(config *FSConfig) *ComponentHost {
+	h.preopens = append(h.preopens, config.preopens...)
+	return h
 }
 
 // registerFilesystem registers wasi:filesystem/* host functions and the import handler.
@@ -98,7 +157,8 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 	preopenHandles := make([]uint32, 0, len(h.preopens))
 	for _, po := range h.preopens {
 		handle := h.resources.New(&descriptorResource{
-			path:      po.path,
+			pfs:       po.fs,
+			relPath:   ".",
 			isPreopen: true,
 			guestPath: po.guestPath,
 			descFlags: 0x01 | 0x20, // READ | MUTATE_DIRECTORY
@@ -200,7 +260,7 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 					return
 				}
 
-				file, err := os.Open(dr.path)
+				file, err := dr.pfs.Open(dr.relPath)
 				if err != nil {
 					streamHandle := h.resources.New(&streamResource{})
 					futureResult := make([]byte, 20)
@@ -211,9 +271,7 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 					mem.WriteUint32Le(retPtr+4, futureHandle)
 					return
 				}
-				if offset > 0 {
-					_, _ = file.Seek(offset, 0)
-				}
+				seekOrSkip(file, offset)
 
 				streamHandle := h.resources.New(&streamResource{reader: file})
 				futureResult := make([]byte, 20) // result<_, error-code>: disc=0 (Ok)
@@ -242,7 +300,7 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 				}
 				dr := res.(*descriptorResource)
 
-				file, err := os.OpenFile(dr.path, os.O_WRONLY, 0o666)
+				file, err := dr.pfs.OpenFile(dr.relPath, os.O_WRONLY, 0o666)
 				if err != nil {
 					futureResult := make([]byte, 20)
 					futureResult[0] = 1
@@ -286,7 +344,7 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 				}
 				dr := res.(*descriptorResource)
 
-				file, err := os.OpenFile(dr.path, os.O_WRONLY|os.O_APPEND, 0o666)
+				file, err := dr.pfs.OpenFile(dr.relPath, os.O_WRONLY|os.O_APPEND, 0o666)
 				if err != nil {
 					futureResult := make([]byte, 20)
 					futureResult[0] = 1
@@ -330,7 +388,7 @@ func (h *ComponentHost) registerFilesystem(cl *wazero.ComponentLinker) {
 				}
 				dr := res.(*descriptorResource)
 
-				entries, err := os.ReadDir(dr.path)
+				entries, err := dr.pfs.ReadDir(dr.relPath)
 				if err != nil {
 					streamHandle := h.resources.New(&dirEntryStream{})
 					futureResult := make([]byte, 20)
@@ -433,7 +491,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 			dr := res.(*descriptorResource)
-			info, err := os.Lstat(dr.path)
+			info, err := dr.pfs.Lstat(dr.relPath)
 			if err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
@@ -486,7 +544,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 			if dr.file != nil {
 				info, err = dr.file.Stat()
 			} else {
-				info, err = os.Lstat(dr.path)
+				info, err = dr.pfs.Lstat(dr.relPath)
 			}
 			if err != nil {
 				mem.WriteByte(retPtr, 1)
@@ -517,7 +575,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 			}
 			dr := res.(*descriptorResource)
 			// *-at methods require a directory descriptor.
-			if info, err := os.Lstat(dr.path); err != nil || !info.IsDir() {
+			if info, err := dr.pfs.Lstat(dr.relPath); err != nil || !info.IsDir() {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+8, ecNotDirectory)
 				stack[0] = 2
@@ -543,13 +601,13 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			fullPath := filepath.Join(dr.path, relPath)
+			childPath := filepath.Join(dr.relPath, relPath)
 			var info os.FileInfo
 			var statErr error
 			if flags&1 != 0 {
-				info, statErr = os.Stat(fullPath)
+				info, statErr = dr.pfs.Stat(childPath)
 			} else {
-				info, statErr = os.Lstat(fullPath)
+				info, statErr = dr.pfs.Lstat(childPath)
 			}
 			if statErr != nil {
 				mem.WriteByte(retPtr, 1)
@@ -611,10 +669,10 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 
-			fullPath := filepath.Join(dr.path, relPath)
+			childPath := filepath.Join(dr.relPath, relPath)
 			if pathFlags&1 != 0 {
-				if resolved, err := filepath.EvalSymlinks(fullPath); err == nil {
-					fullPath = resolved
+				if resolved, err := dr.pfs.EvalSymlinks(childPath); err == nil {
+					childPath = resolved
 				}
 			}
 
@@ -628,7 +686,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 			}
 
 			// Check if target is a directory.
-			info, statErr := os.Lstat(fullPath)
+			info, statErr := dr.pfs.Lstat(childPath)
 			isDir := statErr == nil && info.IsDir()
 
 			// WRITE on a directory is not allowed.
@@ -674,14 +732,14 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 
 			// For directories, just validate it exists; don't open as file.
 			if isDir {
-				handle := h.resources.New(&descriptorResource{path: fullPath, descFlags: dFlags})
+				handle := h.resources.New(&descriptorResource{pfs: dr.pfs, relPath: childPath, descFlags: dFlags})
 				mem.WriteByte(retPtr, 0)
 				mem.WriteUint32Le(retPtr+4, handle)
 				stack[0] = 2
 				return
 			}
 
-			file, err := os.OpenFile(fullPath, osFlags, 0o666)
+			file, err := dr.pfs.OpenFile(childPath, osFlags, 0o666)
 			if err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteUint32Le(retPtr+4, uint32(mapErrno(err)))
@@ -689,7 +747,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 
-			handle := h.resources.New(&descriptorResource{path: fullPath, file: file, descFlags: dFlags})
+			handle := h.resources.New(&descriptorResource{pfs: dr.pfs, relPath: childPath, file: file, descFlags: dFlags})
 			mem.WriteByte(retPtr, 0) // ok
 			mem.WriteUint32Le(retPtr+4, handle)
 			stack[0] = 2
@@ -732,7 +790,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			if err := os.Mkdir(filepath.Join(dr.path, relPath), 0o755); err != nil {
+			if err := dr.pfs.Mkdir(filepath.Join(dr.relPath, relPath), 0o755); err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
 				stack[0] = 2
@@ -785,8 +843,8 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			fullPath := filepath.Join(dr.path, relPath)
-			info, err := os.Lstat(fullPath)
+			childPath := filepath.Join(dr.relPath, relPath)
+			info, err := dr.pfs.Lstat(childPath)
 			if err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
@@ -799,7 +857,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			if err := os.Remove(fullPath); err != nil {
+			if err := dr.pfs.Remove(childPath); err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
 				stack[0] = 2
@@ -845,8 +903,8 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			fullPath := filepath.Join(dr.path, relPath)
-			info, err := os.Lstat(fullPath)
+			childPath := filepath.Join(dr.relPath, relPath)
+			info, err := dr.pfs.Lstat(childPath)
 			if err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
@@ -859,7 +917,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			if err := os.Remove(fullPath); err != nil {
+			if err := dr.pfs.Remove(childPath); err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
 				stack[0] = 2
@@ -912,8 +970,6 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 
-			oldFull := filepath.Join(oldDr.path, oldRel)
-			newFull := filepath.Join(newDr.path, newRel)
 			// Renaming "." is not allowed.
 			if filepath.Clean(oldRel) == "." {
 				mem.WriteByte(retPtr, 1)
@@ -921,9 +977,18 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			if err := os.Rename(oldFull, newFull); err != nil {
+			oldChild := filepath.Join(oldDr.relPath, oldRel)
+			newChild := filepath.Join(newDr.relPath, newRel)
+			var renameErr error
+			if oldDr.pfs == newDr.pfs {
+				renameErr = oldDr.pfs.Rename(oldChild, newChild)
+			} else {
+				// Cross-preopen rename: try via display paths for host-path backed FS.
+				renameErr = os.Rename(oldDr.pfs.DisplayPath(oldChild), newDr.pfs.DisplayPath(newChild))
+			}
+			if renameErr != nil {
 				mem.WriteByte(retPtr, 1)
-				mem.WriteByte(retPtr+4, mapErrno(err))
+				mem.WriteByte(retPtr+4, mapErrno(renameErr))
 				stack[0] = 2
 				return
 			}
@@ -970,8 +1035,8 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 
-			newFull := filepath.Join(dr.path, newRel)
-			if err := os.Symlink(string(oldPath), newFull); err != nil {
+			newChild := filepath.Join(dr.relPath, newRel)
+			if err := dr.pfs.Symlink(string(oldPath), newChild); err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
 				stack[0] = 2
@@ -1025,20 +1090,25 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 			// Hard linking directories is not allowed.
-			oldFull := filepath.Join(oldDr.path, oldRel)
-			if info, err := os.Lstat(oldFull); err == nil && info.IsDir() {
+			oldChild := filepath.Join(oldDr.relPath, oldRel)
+			if info, err := oldDr.pfs.Lstat(oldChild); err == nil && info.IsDir() {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, ecNotPermitted)
 				stack[0] = 2
 				return
 			}
 
-			if err := os.Link(
-				oldFull,
-				filepath.Join(newDr.path, newRel),
-			); err != nil {
+			newChild := filepath.Join(newDr.relPath, newRel)
+			var linkErr error
+			if oldDr.pfs == newDr.pfs {
+				linkErr = oldDr.pfs.Link(oldChild, newChild)
+			} else {
+				// Cross-preopen link: try via display paths for host-path backed FS.
+				linkErr = os.Link(oldDr.pfs.DisplayPath(oldChild), newDr.pfs.DisplayPath(newChild))
+			}
+			if linkErr != nil {
 				mem.WriteByte(retPtr, 1)
-				mem.WriteByte(retPtr+4, mapErrno(err))
+				mem.WriteByte(retPtr+4, mapErrno(linkErr))
 				stack[0] = 2
 				return
 			}
@@ -1061,7 +1131,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 			dr := res.(*descriptorResource)
-			info, err := os.Lstat(dr.path)
+			info, err := dr.pfs.Lstat(dr.relPath)
 			if err != nil || info.IsDir() {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, ecBadDescriptor)
@@ -1113,7 +1183,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 			if dr.file != nil {
 				truncErr = dr.file.Truncate(size)
 			} else {
-				truncErr = os.Truncate(dr.path, size)
+				truncErr = dr.pfs.Truncate(dr.relPath, size)
 			}
 			if err := truncErr; err != nil {
 				mem.WriteByte(retPtr, 1)
@@ -1143,8 +1213,8 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 			dr := res.(*descriptorResource)
-			atime, mtime := readSetTimesArgs(mem, dr.path, argsPtr+8, argsPtr+32)
-			if err := os.Chtimes(dr.path, atime, mtime); err != nil {
+			atime, mtime := readSetTimesArgs(mem, dr.pfs, dr.relPath, argsPtr+8, argsPtr+32)
+			if err := dr.pfs.Chtimes(dr.relPath, atime, mtime); err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
 				stack[0] = 2
@@ -1196,15 +1266,15 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			fullPath := filepath.Join(dr.path, relPath)
-			if _, err := os.Lstat(fullPath); err != nil {
+			childPath := filepath.Join(dr.relPath, relPath)
+			if _, err := dr.pfs.Lstat(childPath); err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
 				stack[0] = 2
 				return
 			}
-			atime, mtime := readSetTimesArgs(mem, fullPath, argsPtr+16, argsPtr+40)
-			if err := os.Chtimes(fullPath, atime, mtime); err != nil {
+			atime, mtime := readSetTimesArgs(mem, dr.pfs, childPath, argsPtr+16, argsPtr+40)
+			if err := dr.pfs.Chtimes(childPath, atime, mtime); err != nil {
 				mem.WriteByte(retPtr, 1)
 				mem.WriteByte(retPtr+4, mapErrno(err))
 				stack[0] = 2
@@ -1232,8 +1302,8 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 			dr1 := res1.(*descriptorResource)
 			dr2 := res2.(*descriptorResource)
 
-			info1, err1 := os.Stat(dr1.path)
-			info2, err2 := os.Stat(dr2.path)
+			info1, err1 := dr1.pfs.Stat(dr1.relPath)
+			info2, err2 := dr2.pfs.Stat(dr2.relPath)
 			if err1 != nil || err2 != nil {
 				mem.WriteByte(retPtr, 0)
 			} else if os.SameFile(info1, info2) {
@@ -1259,7 +1329,7 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				return
 			}
 			dr := res.(*descriptorResource)
-			writeMetaHash(mem, retPtr, dr.path)
+			writeMetaHash(mem, retPtr, dr.pfs, dr.relPath)
 			stack[0] = 2
 		})
 
@@ -1295,8 +1365,8 @@ func (h *ComponentHost) asyncLowerFS(methodName string, paramTypes, resultTypes 
 				stack[0] = 2
 				return
 			}
-			fullPath := filepath.Join(dr.path, relPath)
-			writeMetaHash(mem, retPtr, fullPath)
+			childPath := filepath.Join(dr.relPath, relPath)
+			writeMetaHash(mem, retPtr, dr.pfs, childPath)
 			stack[0] = 2
 		})
 	}
@@ -1994,15 +2064,15 @@ func writeDescriptorStat(mem api.Memory, retPtr uint32, info os.FileInfo) {
 	mem.Write(retPtr, buildDescriptorStat(info))
 }
 
-func writeMetaHash(mem api.Memory, retPtr uint32, path string) {
-	info, err := os.Lstat(path)
+func writeMetaHash(mem api.Memory, retPtr uint32, pfs preopenFS, relPath string) {
+	info, err := pfs.Lstat(relPath)
 	if err != nil {
 		mem.WriteByte(retPtr, 1)
 		mem.WriteByte(retPtr+8, mapErrno(err))
 		return
 	}
 	h := sha256.New()
-	h.Write([]byte(path))
+	h.Write([]byte(pfs.DisplayPath(relPath)))
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], uint64(info.ModTime().UnixNano()))
 	h.Write(buf[:])
@@ -2056,9 +2126,9 @@ func readNewTimestamp(mem api.Memory, offset uint32, fallback time.Time) time.Ti
 }
 
 // readSetTimesArgs reads access and modification timestamp arguments.
-func readSetTimesArgs(mem api.Memory, path string, atimeOffset, mtimeOffset uint32) (atime, mtime time.Time) {
+func readSetTimesArgs(mem api.Memory, pfs preopenFS, relPath string, atimeOffset, mtimeOffset uint32) (atime, mtime time.Time) {
 	// Use current file times as fallback for no-change
-	info, err := os.Lstat(path)
+	info, err := pfs.Lstat(relPath)
 	if err != nil {
 		now := time.Now()
 		atime = now
